@@ -1,0 +1,6 @@
+LPECO_SYSTEMD_SHOW_V1
+UNIT	system	partial.service
+Id=partial.service
+LoadState=loaded
+ActiveState=active
+ExecStart={ path=/usr/bin/partial ; argv[]=/usr/bin/partial

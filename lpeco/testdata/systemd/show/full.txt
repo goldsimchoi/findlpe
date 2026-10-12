@@ -1,0 +1,85 @@
+LPECO_SYSTEMD_SHOW_V1
+UNIT	system	demo.service
+Id=demo.service
+Names=demo.service demo-alias.service
+LoadState=loaded
+ActiveState=active
+SubState=running
+Type=simple
+User=root
+Group=root
+UID=0
+GID=0
+DynamicUser=no
+MainPID=101
+ControlGroup=/system.slice/demo.service
+FragmentPath=/usr/lib/systemd/system/demo.service
+DropInPaths=/etc/systemd/system/demo.service.d/20-local.conf
+Restart=always
+NoNewPrivileges=yes
+CapabilityBoundingSet=cap_chown cap_setuid
+AmbientCapabilities=
+EnvironmentFiles=/etc/default/demo (ignore_errors=no)
+ExecSearchPath=/opt/demo/bin:/usr/bin
+WorkingDirectory=/opt/demo
+RootDirectory=
+RootImage=
+ExecStart={ path=/usr/bin/runtime-demo ; argv[]=/usr/bin/runtime-demo --serve ; ignore_errors=no ; }
+TriggeredBy=demo.timer demo.path
+END_UNIT
+UNIT	system	demo.timer
+Id=demo.timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=demo.service
+NextElapseUSecRealtime=Mon 2026-10-12 12:00:00 KST
+END_UNIT
+UNIT	system	agent.socket
+Id=agent.socket
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+Unit=
+END_UNIT
+UNIT	system	demo.path
+Id=demo.path
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=demo.service
+END_UNIT
+UNIT	system	failed.service
+Id=failed.service
+LoadState=loaded
+ActiveState=failed
+SubState=failed
+Type=notify
+User=root
+UID=0
+MainPID=0
+ControlGroup=/system.slice/failed.service
+END_UNIT
+UNIT	system	ones.service
+Id=ones.service
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+Type=oneshot
+User=root
+UID=0
+RemainAfterExit=no
+END_UNIT
+UNIT	user	user-demo.service
+Id=user-demo.service
+LoadState=loaded
+ActiveState=active
+SubState=running
+Type=simple
+User=
+UID=1000
+ManagerUID=1000
+MainPID=501
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/user-demo.service
+FragmentPath=/home/test/.config/systemd/user/user-demo.service
+END_UNIT

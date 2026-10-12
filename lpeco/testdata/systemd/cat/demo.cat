@@ -1,0 +1,15 @@
+# /usr/lib/systemd/system/demo.service
+[Unit]
+Description=Demo service
+[Service]
+User=daemon
+ExecStartPre=/usr/bin/check-demo
+ExecStart=/opt/demo/bin/run --from-file
+ExecReload=/bin/kill -HUP $MAINPID
+EnvironmentFile=/etc/default/demo
+WorkingDirectory=/srv/demo
+# /etc/systemd/system/demo.service.d/20-local.conf
+[Service]
+User=root
+ExecStart=
+ExecStart=/opt/demo/bin/run --from-dropin

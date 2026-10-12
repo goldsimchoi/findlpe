@@ -1,0 +1,8 @@
+# /etc/systemd/system/file-only.service
+[Unit]
+Description=File only service
+[Service]
+User=root
+Type=oneshot
+ExecStart=/opt/file-only/run
+NoNewPrivileges=no
