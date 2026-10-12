@@ -1,0 +1,16 @@
+LPECO_PROC_V1
+PROCESS	404
+ERROR	status	process vanished
+ERROR	cmdline	process vanished
+END_PROCESS
+PROCESS	405
+STATUS
+Name:	protected
+PPid:	1
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+END_STATUS
+STARTTIME	999
+ERROR	cmdline	permission denied
+ERROR	exe	permission denied
+END_PROCESS

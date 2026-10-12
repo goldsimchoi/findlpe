@@ -1,0 +1,24 @@
+LPECO_CONTEXT_V1
+STATUS
+Name:	lpeco-shell
+Uid:	1000	1001	1002	1003
+Gid:	100	101	102	103
+Groups:	4 24 100 998
+CapInh:	0000000000000000
+CapPrm:	0000000000000400
+CapEff:	0000000000000400
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	1
+Seccomp:	2
+END_STATUS
+NS	user	user:[4026531837]
+NS	pid	pid:[4026533001]
+NS	mnt	mnt:[4026532999]
+LSM	apparmor	enforce
+OS	Linux
+ARCH	x86_64
+INIT	systemd
+SYSTEMD_RUNNING	1
+COMMAND	systemctl	1
+COMMAND	getfacl	0

@@ -1,0 +1,16 @@
+LPECO_PROC_V1
+PROCESS	1
+STATUS
+Name:	init
+State:	S
+PPid:	0
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+END_STATUS
+STARTTIME	1
+CMDLINE_HEX	2f7362696e2f696e697400
+ERROR	exe	permission denied
+ERROR	cwd	permission denied
+ROOT_HEX	2f
+CGROUP	0::/
+END_PROCESS
