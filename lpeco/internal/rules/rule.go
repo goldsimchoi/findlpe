@@ -14,6 +14,19 @@ type Metadata struct {
 	Description string `json:"description"`
 }
 
+type Diagnostic struct {
+	Code        string        `json:"code"`
+	RuleID      string        `json:"rule_id"`
+	Message     string        `json:"message"`
+	Node        model.NodeRef `json:"node"`
+	EvidenceIDs []string      `json:"evidence_ids"`
+}
+
+type Evaluation struct {
+	Candidates  []model.Candidate `json:"candidates"`
+	Diagnostics []Diagnostic      `json:"diagnostics"`
+}
+
 type Rule interface {
 	ID() string
 	Metadata() Metadata
@@ -30,14 +43,34 @@ func PrimaryRules() []Rule {
 	}
 }
 
+func AllRules() []Rule {
+	return append(PrimaryRules(),
+		writableScheduledCommandRule{},
+		suidSGIDControlRule{},
+		capabilityBoundaryRule{},
+		loaderPathControlRule{},
+		sudoPolicyRule{},
+		adminSocketControlRule{},
+	)
+}
+
 // EvaluateAll evaluates a rule set without allowing one malformed result to
 // contaminate reports. Candidate IDs are de-duplicated and output order is
 // deterministic.
 func EvaluateAll(ctx context.Context, g *graphpkg.Graph, ruleSet []Rule) []model.Candidate {
+	return Evaluate(ctx, g, ruleSet).Candidates
+}
+
+type diagnosticProvider interface {
+	Diagnostics(context.Context, *graphpkg.Graph) []Diagnostic
+}
+
+func Evaluate(ctx context.Context, g *graphpkg.Graph, ruleSet []Rule) Evaluation {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	byID := make(map[string]model.Candidate)
+	diagnosticByKey := make(map[string]Diagnostic)
 	for _, rule := range ruleSet {
 		if rule == nil || ctx.Err() != nil {
 			break
@@ -55,6 +88,13 @@ func EvaluateAll(ctx context.Context, g *graphpkg.Graph, ruleSet []Rule) []model
 			}
 			byID[candidate.ID] = candidate
 		}
+		if provider, ok := rule.(diagnosticProvider); ok {
+			for _, diagnostic := range provider.Diagnostics(ctx, g) {
+				diagnostic.EvidenceIDs = mergeStrings(nil, diagnostic.EvidenceIDs)
+				key := diagnostic.Code + "\x00" + diagnostic.RuleID + "\x00" + diagnostic.Node.ID + "\x00" + diagnostic.Message
+				diagnosticByKey[key] = diagnostic
+			}
+		}
 	}
 	result := make([]model.Candidate, 0, len(byID))
 	for _, candidate := range byID {
@@ -70,7 +110,16 @@ func EvaluateAll(ctx context.Context, g *graphpkg.Graph, ruleSet []Rule) []model
 		}
 		return result[i].ID < result[j].ID
 	})
-	return result
+	diagnostics := make([]Diagnostic, 0, len(diagnosticByKey))
+	for _, diagnostic := range diagnosticByKey {
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	sort.Slice(diagnostics, func(i, j int) bool {
+		left := diagnostics[i].RuleID + "\x00" + diagnostics[i].Code + "\x00" + diagnostics[i].Node.ID + "\x00" + diagnostics[i].Message
+		right := diagnostics[j].RuleID + "\x00" + diagnostics[j].Code + "\x00" + diagnostics[j].Node.ID + "\x00" + diagnostics[j].Message
+		return left < right
+	})
+	return Evaluation{Candidates: result, Diagnostics: diagnostics}
 }
 
 func priorityRank(value model.Priority) int {

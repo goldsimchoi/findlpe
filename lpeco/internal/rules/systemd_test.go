@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	graphpkg "github.com/normalone/lpeco/internal/graph"
@@ -46,13 +47,15 @@ type ruleFixture struct {
 }
 
 type fixtureCase struct {
-	Name         string         `json:"name"`
-	RuleID       string         `json:"rule_id"`
-	Current      string         `json:"current"`
-	WantCount    int            `json:"want_count"`
-	WantPriority model.Priority `json:"want_priority,omitempty"`
-	Nodes        []fixtureNode  `json:"nodes"`
-	Edges        []fixtureEdge  `json:"edges"`
+	Name           string         `json:"name"`
+	RuleID         string         `json:"rule_id"`
+	Current        string         `json:"current"`
+	WantCount      int            `json:"want_count"`
+	WantPriority   model.Priority `json:"want_priority,omitempty"`
+	WantMissing    []string       `json:"want_missing,omitempty"`
+	WantDiagnostic string         `json:"want_diagnostic,omitempty"`
+	Nodes          []fixtureNode  `json:"nodes"`
+	Edges          []fixtureEdge  `json:"edges"`
 }
 
 type fixtureNode struct {
@@ -146,4 +149,20 @@ func assertScenario(t *testing.T, scenario fixtureCase, candidates []model.Candi
 	if scenario.WantCount > 0 && scenario.WantPriority != "" && candidates[0].Priority != scenario.WantPriority {
 		t.Fatalf("priority = %s, want %s: %#v", candidates[0].Priority, scenario.WantPriority, candidates[0])
 	}
+	if scenario.WantCount > 0 {
+		for _, wanted := range scenario.WantMissing {
+			if !containsFragment(candidates[0].MissingFacts, wanted) {
+				t.Fatalf("missing facts = %#v, want fragment %q", candidates[0].MissingFacts, wanted)
+			}
+		}
+	}
+}
+
+func containsFragment(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.Contains(value, wanted) {
+			return true
+		}
+	}
+	return false
 }

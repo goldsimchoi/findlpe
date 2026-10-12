@@ -1,0 +1,73 @@
+{
+  "cases": [
+    {
+      "name": "active-root-schedule-writable-script",
+      "rule_id": "scheduler.writable-command",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P0",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"cron","kind":"Trigger","label":"/etc/cron.d/demo","attributes":{"scheduler":true,"active":true,"kind":"cron"}},
+        {"key":"script","kind":"Script","label":"/opt/demo/job.sh","attributes":{"path":"/opt/demo/job.sh"}}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"cron","to":"root"},
+        {"kind":"EXECUTES","from":"cron","to":"script","attributes":{"resolved":true,"valid":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"script","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "inactive-schedule",
+      "rule_id": "scheduler.writable-command",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"cron","kind":"Trigger","label":"disabled periodic","attributes":{"scheduler":true,"active":false}},
+        {"key":"script","kind":"Script","label":"/opt/demo/job.sh"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"cron","to":"root"},
+        {"kind":"EXECUTES","from":"cron","to":"script","attributes":{"resolved":true,"valid":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"script","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "same-user-schedule",
+      "rule_id": "scheduler.writable-command",
+      "current": "attacker",
+      "want_count": 0,
+      "want_diagnostic": "inventory-only",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"cron","kind":"Trigger","label":"user crontab","attributes":{"scheduler":true,"active":true}},
+        {"key":"script","kind":"Script","label":"/home/u/job.sh"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"cron","to":"attacker"},
+        {"kind":"EXECUTES","from":"cron","to":"script","attributes":{"resolved":true,"valid":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"script","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "unresolved-scheduled-command",
+      "rule_id": "scheduler.writable-command",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"cron","kind":"Trigger","label":"cron","attributes":{"scheduler":true,"active":true}},
+        {"key":"script","kind":"Script","label":"$JOB"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"cron","to":"root"},
+        {"kind":"EXECUTES","from":"cron","to":"script","attributes":{"resolved":false,"valid":false}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"script","attributes":{"controlled":true}}
+      ]
+    }
+  ]
+}

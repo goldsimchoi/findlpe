@@ -79,7 +79,18 @@ func privilegeBoundary(g *graphpkg.Graph, current, target model.NodeRef) bool {
 	}
 	currentUID, currentHasUID := graphpkg.IntAttribute(currentNode.Attributes, "uid")
 	targetUID, targetHasUID := graphpkg.IntAttribute(targetNode.Attributes, "uid")
-	return currentHasUID && targetHasUID && currentUID != targetUID
+	if currentHasUID && targetHasUID && currentUID != targetUID {
+		return true
+	}
+	currentGID, currentHasGID := graphpkg.IntAttribute(currentNode.Attributes, "gid")
+	targetGID, targetHasGID := graphpkg.IntAttribute(targetNode.Attributes, "gid")
+	if currentHasGID && targetHasGID && currentGID != targetGID {
+		return true
+	}
+	if graphpkg.BoolAttribute(targetNode.Attributes, "capability_boundary", false) {
+		return true
+	}
+	return false
 }
 
 func controlEdge(g *graphpkg.Graph, current, object model.NodeRef) (model.Edge, bool) {

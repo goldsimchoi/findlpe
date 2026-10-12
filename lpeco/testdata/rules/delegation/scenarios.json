@@ -1,0 +1,39 @@
+{
+  "cases": [
+    {
+      "name":"sudo-root-command-positive","rule_id":"delegation.sudo-policy","current":"attacker","want_count":1,"want_priority":"P0",
+      "nodes":[
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"command","kind":"Executable","label":"/usr/bin/systemctl","attributes":{"delegated_command":true}}
+      ],
+      "edges":[
+        {"kind":"RUNS_AS","from":"command","to":"root"},
+        {"kind":"CAN_EXECUTE","from":"attacker","to":"command","attributes":{"delegation":true,"policy_confirmed":true,"no_password":true}}
+      ]
+    },
+    {
+      "name":"sudo-target-current-user","rule_id":"delegation.sudo-policy","current":"attacker","want_count":0,"want_diagnostic":"inventory-only",
+      "nodes":[
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"command","kind":"Executable","label":"/usr/bin/id","attributes":{"delegated_command":true}}
+      ],
+      "edges":[
+        {"kind":"RUNS_AS","from":"command","to":"attacker"},
+        {"kind":"CAN_EXECUTE","from":"attacker","to":"command","attributes":{"delegation":true,"policy_confirmed":true}}
+      ]
+    },
+    {
+      "name":"sudo-policy-unconfirmed","rule_id":"delegation.sudo-policy","current":"attacker","want_count":0,
+      "nodes":[
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"command","kind":"Executable","label":"ALL","attributes":{"delegated_command":true}}
+      ],
+      "edges":[
+        {"kind":"RUNS_AS","from":"command","to":"root"},
+        {"kind":"CAN_EXECUTE","from":"attacker","to":"command","attributes":{"delegation":true,"policy_confirmed":false}}
+      ]
+    }
+  ]
+}

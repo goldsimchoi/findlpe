@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
+	binarycollect "github.com/normalone/lpeco/internal/collect/binary"
+	containercollect "github.com/normalone/lpeco/internal/collect/container"
 	contextcollect "github.com/normalone/lpeco/internal/collect/context"
 	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	processcollect "github.com/normalone/lpeco/internal/collect/process"
+	schedulercollect "github.com/normalone/lpeco/internal/collect/scheduler"
 	systemdcollect "github.com/normalone/lpeco/internal/collect/systemd"
 	"github.com/normalone/lpeco/internal/model"
 )
@@ -74,6 +78,16 @@ func Build(facts []model.Fact) (*Graph, []Diagnostic) {
 			b.addSystemdActivation(fact)
 		case "systemd_unit":
 			b.addSystemdPaths(fact)
+		case "schedule":
+			b.addSchedule(fact)
+		case "privileged_binary":
+			b.addPrivilegedBinary(fact)
+		case "binary_dependency":
+			b.addBinaryDependency(fact)
+		case "delegation":
+			b.addDelegation(fact)
+		case "admin_socket":
+			b.addAdminSocket(fact)
 		}
 	}
 	b.addFilesystemRelationships()
@@ -215,8 +229,13 @@ func (b *graphBuilder) addSystemdUnit(fact model.Fact) {
 		return
 	}
 	b.unitByName[value.Name] = appendUniqueRefs(b.unitByName[value.Name], ref)
-	principal := model.Principal{UID: value.UID, GID: value.GID}
-	target := b.ensurePrincipal(fact, principal, evidence, confidence)
+	var target model.NodeRef
+	if value.User != "" && value.User != "root" && value.UID == 0 {
+		target = b.namedPrincipal(fact, value.User, evidence, model.ConfidenceLow)
+	} else {
+		principal := model.Principal{UID: value.UID, GID: value.GID}
+		target = b.ensurePrincipal(fact, principal, evidence, confidence)
+	}
 	b.addEdge(fact, EdgeSpec{Kind: model.EdgeRunsAs, From: ref, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
 		Attributes: marshalAttributes(map[string]any{"dynamic_user": value.DynamicUser})})
 }
@@ -311,6 +330,146 @@ func (b *graphBuilder) addSystemdPaths(fact model.Fact) {
 	}
 }
 
+func (b *graphBuilder) addSchedule(fact model.Fact) {
+	var value schedulercollect.ScheduleFact
+	if !b.decode(fact, &value) || value.SourcePath == "" {
+		return
+	}
+	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
+	confidence := factConfidence(fact, value.Confidence)
+	trigger := b.addNode(fact, NodeSpec{
+		Key:  value.Kind + ":" + value.SourcePath + ":" + value.Schedule + ":" + value.Command,
+		Kind: model.NodeTrigger, Label: value.SourcePath, SourceCollector: fact.SourceCollector,
+		EvidenceIDs: evidence, Confidence: confidence,
+		Attributes: marshalAttributes(map[string]any{"scheduler": true, "active": value.Active, "kind": value.Kind, "schedule": value.Schedule, "command": value.Command, "trigger_path": value.TriggerPath}),
+	})
+	target := b.namedPrincipal(fact, value.User, evidence, confidence)
+	if target.ID != "" {
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeRunsAs, From: trigger, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence})
+	}
+	if value.Script != "" {
+		script := b.ensurePathNode(fact, value.Script, model.NodeScript, evidence, confidence)
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeInterprets, From: trigger, To: script, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"resolved": filepath.IsAbs(value.Script), "valid": filepath.IsAbs(value.Script), "chain": "script"})})
+	}
+	if value.Interpreter != "" {
+		interpreter := b.ensurePathNode(fact, value.Interpreter, model.NodeExecutable, evidence, confidence)
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeExecutes, From: trigger, To: interpreter, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"resolved": filepath.IsAbs(value.Interpreter), "valid": filepath.IsAbs(value.Interpreter), "chain": "interpreter"})})
+	} else if command := firstCommand(value.Command); command != "" {
+		executable := b.ensurePathNode(fact, command, model.NodeExecutable, evidence, confidence)
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeExecutes, From: trigger, To: executable, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"resolved": filepath.IsAbs(command), "valid": filepath.IsAbs(command), "chain": "command"})})
+	}
+}
+
+func (b *graphBuilder) addPrivilegedBinary(fact model.Fact) {
+	var value binarycollect.PrivilegedBinaryFact
+	if !b.decode(fact, &value) || value.Path == "" {
+		return
+	}
+	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
+	confidence := factConfidence(fact, value.Confidence)
+	attributes := map[string]any{
+		"path": value.Path, "mode": value.Mode, "owner_uid": value.UID, "owner_gid": value.GID,
+		"suid": value.SUID, "sgid": value.SGID, "capabilities": value.Capabilities,
+		"capability_boundary":        len(value.Capabilities) > 0,
+		"bit_preservation_confirmed": false,
+	}
+	binary := b.addNode(fact, NodeSpec{Key: filepath.Clean(value.Path), Kind: model.NodeExecutable, Label: value.Path,
+		SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence, Attributes: marshalAttributes(attributes)})
+	b.registerPath(value.Path, binary)
+	var target model.NodeRef
+	switch {
+	case value.SUID:
+		target = b.ensurePrincipal(fact, model.Principal{UID: value.UID, GID: value.GID}, evidence, confidence)
+	case value.SGID && b.identity != nil:
+		principal := model.Principal{UID: b.currentPrincipal.UID, GID: value.GID}
+		target = b.addNode(fact, NodeSpec{Key: fmt.Sprintf("uid:%d:gid:%d", principal.UID, principal.GID), Kind: model.NodePrincipal,
+			Label: fmt.Sprintf("uid:%d gid:%d", principal.UID, principal.GID), SourceCollector: fact.SourceCollector,
+			EvidenceIDs: evidence, Confidence: confidence, Attributes: marshalAttributes(principal)})
+	case len(value.Capabilities) > 0:
+		uid := -1
+		gid := -1
+		if b.identity != nil {
+			uid, gid = b.currentPrincipal.UID, b.currentPrincipal.GID
+		}
+		target = b.addNode(fact, NodeSpec{Key: "capability:" + filepath.Clean(value.Path), Kind: model.NodePrincipal,
+			Label: "file capabilities of " + value.Path, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"uid": uid, "gid": gid, "capabilities": value.Capabilities, "capability_boundary": true})})
+	}
+	if target.ID != "" {
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeRunsAs, From: binary, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence})
+	}
+}
+
+func (b *graphBuilder) addBinaryDependency(fact model.Fact) {
+	var value binarycollect.DependencyFact
+	if !b.decode(fact, &value) || value.ConsumerPath == "" || value.Target == "" {
+		return
+	}
+	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
+	confidence := factConfidence(fact, value.Confidence)
+	consumer := b.ensurePathNode(fact, value.ConsumerPath, model.NodeExecutable, evidence, confidence)
+	switch value.Kind {
+	case "rpath", "runpath":
+		target := b.ensurePathNode(fact, value.Target, model.NodeDirectory, evidence, confidence)
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeResolvesThrough, From: consumer, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"loader_path": true, "dependency_kind": value.Kind, "resolved": value.Resolved})})
+	case "interpreter", "script":
+		target := b.ensurePathNode(fact, value.Target, model.NodeExecutable, evidence, confidence)
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeInterprets, From: consumer, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"dependency_kind": value.Kind, "resolved": value.Resolved, "observed": true})})
+	default:
+		target := b.ensurePathNode(fact, value.Target, model.NodeLibrary, evidence, confidence)
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeLoads, From: consumer, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"dependency_kind": value.Kind, "resolved": value.Resolved, "observed": true})})
+	}
+}
+
+func (b *graphBuilder) addDelegation(fact model.Fact) {
+	var value binarycollect.DelegationFact
+	if !b.decode(fact, &value) || value.Command == "" {
+		return
+	}
+	current, ok := b.graph.CurrentPrincipal()
+	if !ok {
+		b.diagnose("unresolved-principal", "delegation fact has no current principal", fact)
+		return
+	}
+	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
+	confidence := factConfidence(fact, value.Confidence)
+	command := b.addNode(fact, NodeSpec{Key: "sudo:" + value.Command, Kind: model.NodeExecutable, Label: value.Command,
+		SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+		Attributes: marshalAttributes(map[string]any{"delegated_command": true, "command": value.Command, "source_kind": value.SourceKind, "source_path": value.SourcePath})})
+	target := b.namedPrincipal(fact, value.RunAs, evidence, confidence)
+	if target.ID != "" {
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeRunsAs, From: command, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence})
+	}
+	policyConfirmed := value.SourceKind == "sudo-list"
+	b.addEdge(fact, EdgeSpec{Kind: model.EdgeCanExecute, From: current, To: command, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+		Attributes: marshalAttributes(map[string]any{"delegation": true, "policy_confirmed": policyConfirmed, "no_password": value.NoPassword, "reachable": true, "subject": value.Subject})})
+}
+
+func (b *graphBuilder) addAdminSocket(fact model.Fact) {
+	var value containercollect.AdminSocketFact
+	if !b.decode(fact, &value) || value.Path == "" {
+		return
+	}
+	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
+	confidence := factConfidence(fact, value.Confidence)
+	socket := b.addNode(fact, NodeSpec{Key: filepath.Clean(value.Path), Kind: model.NodeSocket, Label: value.Path,
+		SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+		Attributes: marshalAttributes(map[string]any{"path": value.Path, "daemon": value.Daemon, "daemon_uid": value.DaemonUID, "gid": value.GID, "mode": value.Mode, "direct_access": value.WriteAccess, "acl_summary": value.ACLSummary})})
+	b.registerPath(value.Path, socket)
+	target := b.ensurePrincipal(fact, model.Principal{UID: value.DaemonUID}, evidence, confidence)
+	b.addEdge(fact, EdgeSpec{Kind: model.EdgeRunsAs, From: socket, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence})
+	if current, ok := b.graph.CurrentPrincipal(); ok && value.WriteAccess {
+		b.addEdge(fact, EdgeSpec{Kind: model.EdgeCanWrite, From: current, To: socket, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"controlled": true, "direct_access": true, "access_check": true})})
+	}
+}
+
 func (b *graphBuilder) addFilesystemRelationships() {
 	sort.Slice(b.mounts, func(i, j int) bool {
 		if b.mounts[i].MountPoint != b.mounts[j].MountPoint {
@@ -345,13 +504,29 @@ func (b *graphBuilder) addFilesystemRelationships() {
 		}
 		resolution := pathcollect.Resolve(target, observations)
 		assessment := pathcollect.EvaluateControl(b.currentPrincipal, resolution, pathcollect.UseWrite)
-		if assessment.State != pathcollect.ControlAllowed || !assessment.Controlled {
-			continue
+		if assessment.State == pathcollect.ControlAllowed && assessment.Controlled {
+			for _, ref := range refs {
+				fact := model.Fact{Kind: "path_control", SourceCollector: "path", EvidenceIDs: assessment.EvidenceIDs, Confidence: assessment.Confidence}
+				b.addEdge(fact, EdgeSpec{Kind: model.EdgeCanWrite, From: current, To: ref, SourceCollector: "path", EvidenceIDs: assessment.EvidenceIDs,
+					Confidence: assessment.Confidence, Attributes: marshalAttributes(assessment)})
+			}
 		}
 		for _, ref := range refs {
-			fact := model.Fact{Kind: "path_control", SourceCollector: "path", EvidenceIDs: assessment.EvidenceIDs, Confidence: assessment.Confidence}
-			b.addEdge(fact, EdgeSpec{Kind: model.EdgeCanWrite, From: current, To: ref, SourceCollector: "path", EvidenceIDs: assessment.EvidenceIDs,
-				Confidence: assessment.Confidence, Attributes: marshalAttributes(assessment)})
+			if ref.Kind != model.NodeExecutable && ref.Kind != model.NodeScript {
+				continue
+			}
+			use := pathcollect.UseNativeExecute
+			if ref.Kind == model.NodeScript {
+				use = pathcollect.UseInterpretedScript
+			}
+			executable := pathcollect.EvaluateControl(b.currentPrincipal, resolution, use)
+			if executable.State != pathcollect.ControlAllowed || !executable.Controlled {
+				continue
+			}
+			attributes := map[string]any{"reachable": true, "controlled": true, "use_kind": executable.UseKind, "state": executable.State}
+			fact := model.Fact{Kind: "path_control", SourceCollector: "path", EvidenceIDs: executable.EvidenceIDs, Confidence: executable.Confidence}
+			b.addEdge(fact, EdgeSpec{Kind: model.EdgeCanExecute, From: current, To: ref, SourceCollector: "path", EvidenceIDs: executable.EvidenceIDs,
+				Confidence: executable.Confidence, Attributes: marshalAttributes(attributes)})
 		}
 	}
 }
@@ -368,10 +543,32 @@ func (b *graphBuilder) ensurePathNode(fact model.Fact, target string, kind model
 	}
 	ref := b.addNode(fact, NodeSpec{Key: key, Kind: kind, Label: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence,
 		Confidence: confidence, Attributes: marshalAttributes(map[string]any{"path": target})})
-	if filepath.IsAbs(target) && ref.ID != "" {
-		b.pathRefs[filepath.Clean(target)] = appendUniqueRefs(b.pathRefs[filepath.Clean(target)], ref)
-	}
+	b.registerPath(target, ref)
 	return ref
+}
+
+func (b *graphBuilder) registerPath(target string, ref model.NodeRef) {
+	if filepath.IsAbs(target) && ref.ID != "" {
+		clean := filepath.Clean(target)
+		b.pathRefs[clean] = appendUniqueRefs(b.pathRefs[clean], ref)
+	}
+}
+
+func (b *graphBuilder) namedPrincipal(fact model.Fact, name string, evidence []string, confidence model.Confidence) model.NodeRef {
+	name = strings.TrimSpace(strings.TrimPrefix(name, "#"))
+	if name == "root" {
+		return b.ensurePrincipal(fact, model.Principal{UID: 0, GID: 0}, evidence, confidence)
+	}
+	if uid, err := strconv.Atoi(name); err == nil && uid >= 0 {
+		return b.ensurePrincipal(fact, model.Principal{UID: uid}, evidence, confidence)
+	}
+	if name == "" {
+		b.diagnose("unresolved-principal", "principal name is empty", fact)
+		return model.NodeRef{}
+	}
+	return b.addNode(fact, NodeSpec{Key: "name:" + name, Kind: model.NodePrincipal, Label: name,
+		SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: model.ConfidenceLow,
+		Attributes: marshalAttributes(map[string]any{"name": name, "resolved": false})})
 }
 
 func (b *graphBuilder) unit(fact model.Fact, name string) (model.NodeRef, bool) {
@@ -446,6 +643,14 @@ func factConfidence(fact model.Fact, embedded model.Confidence) model.Confidence
 
 func containsUnresolved(value string) bool {
 	return strings.ContainsAny(value, "%$")
+}
+
+func firstCommand(value string) string {
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Trim(fields[0], "'\"")
 }
 
 func appendUniqueRefs(values []model.NodeRef, additions ...model.NodeRef) []model.NodeRef {
