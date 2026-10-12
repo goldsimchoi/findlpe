@@ -1,0 +1,3 @@
+dpkg	demo-tools: /usr/bin/demo
+rpm	demo-tools-1.0-1.x86_64
+apk	/usr/bin/demo is owned by demo-tools-1.0-r0

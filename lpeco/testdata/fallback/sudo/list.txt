@@ -1,0 +1,5 @@
+Matching Defaults entries for alice on host:
+    env_reset
+
+User alice may run the following commands on host:
+    (root) NOPASSWD: /usr/bin/systemctl restart demo.service

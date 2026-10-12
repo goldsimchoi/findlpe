@@ -1,0 +1,1 @@
+/usr/local/bin/capped cap_setuid=ep,cap_net_bind_service=eip

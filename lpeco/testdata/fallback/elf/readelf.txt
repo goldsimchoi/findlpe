@@ -1,0 +1,6 @@
+SHEBANG=23212f7573722f62696e2f656e7620707974686f6e330a
+Elf file type is DYN (Position-Independent Executable file)
+[Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]
+ 0x0000000000000001 (NEEDED)             Shared library: [libdemo.so]
+ 0x000000000000000f (RPATH)              Library rpath: [/opt/demo/lib:/usr/local/lib]
+ 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN/lib]

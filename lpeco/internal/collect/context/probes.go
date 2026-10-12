@@ -25,7 +25,7 @@ printf 'ARCH\t%s\n' "$(uname -m 2>/dev/null)"
 _lpeco_init=$(cat /proc/1/comm 2>/dev/null)
 printf 'INIT\t%s\n' "$_lpeco_init"
 if [ "$_lpeco_init" = systemd ] && [ -d /run/systemd/system ]; then printf 'SYSTEMD_RUNNING\t1\n'; else printf 'SYSTEMD_RUNNING\t0\n'; fi
-for _lpeco_cmd in systemctl stat readlink getfacl getcap readelf objdump; do
+for _lpeco_cmd in systemctl stat readlink getfacl getcap readelf objdump sudo find dpkg-query rpm apk; do
   if command -v "$_lpeco_cmd" >/dev/null 2>&1; then printf 'COMMAND\t%s\t1\n' "$_lpeco_cmd"; else printf 'COMMAND\t%s\t0\n' "$_lpeco_cmd"; fi
 done`
 
