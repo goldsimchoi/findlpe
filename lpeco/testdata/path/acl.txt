@@ -1,0 +1,10 @@
+LPECO_PATH_ACL_V1
+ACL	2f7372762f617070
+user::rw-
+user:1000:rwx
+group::r--
+group:2000:rwx
+mask::r-x
+other::---
+default:user:1000:rwx
+END_ACL

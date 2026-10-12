@@ -1,0 +1,5 @@
+36 25 0:32 / / rw,nosuid - ext4 /dev/vda1 rw
+40 36 0:40 /sub /srv/app\040data ro,noexec,nosuid,relatime master:1 - ext4 /dev/vda2 ro
+41 36 0:41 / /net rw,relatime - nfs server:/export rw
+42 36 0:42 / /proc rw,nosuid,nodev,noexec - proc proc rw
+43 36 0:32 /bind /mnt/bind rw,relatime - ext4 /dev/vda1 rw
