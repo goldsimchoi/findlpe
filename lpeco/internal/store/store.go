@@ -40,6 +40,21 @@ type Store struct {
 
 var _ SessionStore = (*Store)(nil)
 
+// SaveSession atomically updates session metadata while preserving the
+// owner-only layout. Orchestration uses it when available; the narrower
+// SessionStore interface remains suitable for lightweight test stores.
+func (s *Store) SaveSession(ctx context.Context, session model.Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session.ID != s.sessionID {
+		return fmt.Errorf("session ID %q does not match store %q", session.ID, s.sessionID)
+	}
+	if _, err := s.loadSessionLocked(ctx); err != nil {
+		return err
+	}
+	return writeJSONAtomic(ctx, s.layout.session, session)
+}
+
 func Open(baseDir, sessionID string) (*Store, error) {
 	paths, err := newLayout(baseDir, sessionID)
 	if err != nil {
