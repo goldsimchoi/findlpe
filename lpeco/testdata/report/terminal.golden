@@ -1,0 +1,21 @@
+LPECO read-only privilege escalation candidates
+Session: session-report (complete, transport ssh)
+Notice: Candidate ranking is a triage aid and does not prove successful privilege escalation.
+
+[P0] systemd.writable-unit-source
+  confidence: high | validation: read_only_validated | category: systemd
+  Applied unit source is writable
+  current: principal-user | target: principal-root | object: file-demo
+  evidence: evidence-a
+  missing facts: none
+
+[P1] process.replaceable-dependency
+  confidence: high | validation: read_only_validated | category: systemd
+  TOKEN=[REDACTED] process lead
+  current: principal-user | target: principal-root | object: file-demo
+  evidence: evidence-z
+  missing facts: repeatable process trigger not confirmed
+
+Observation limitations:
+- Candidate ranking does not prove successful privilege escalation.
+- Read-only observations can be incomplete when permissions deny access.

@@ -47,11 +47,20 @@ type WalkTarget struct {
 
 const privilegedScript = `printf 'LPECO_PRIVILEGED_V1\n'
 case "$2" in ''|*[!0-9]*) exit 64 ;; esac
+_lpeco_root=$1; _lpeco_limit=$2; shift 2
 _lpeco_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
+_lpeco_excluded() {
+  _lpeco_candidate=$1; shift
+  for _lpeco_prefix do
+    case "$_lpeco_candidate" in "$_lpeco_prefix"|"$_lpeco_prefix"/*) return 0 ;; esac
+  done
+  return 1
+}
 _lpeco_count=0
-find "$1" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null |
+find "$_lpeco_root" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null |
 while IFS= read -r _lpeco_path; do
-  _lpeco_count=$((_lpeco_count + 1)); [ "$_lpeco_count" -le "$2" ] || break
+  _lpeco_excluded "$_lpeco_path" "$@" && continue
+  _lpeco_count=$((_lpeco_count + 1)); [ "$_lpeco_count" -le "$_lpeco_limit" ] || break
   _lpeco_meta=$(stat -c '%d:%i|%f|%u|%g' -- "$_lpeco_path" 2>/dev/null) || continue
   _lpeco_dev=${_lpeco_meta%%|*}; _lpeco_rest=${_lpeco_meta#*|}; _lpeco_mode=${_lpeco_rest%%|*}; _lpeco_rest=${_lpeco_rest#*|}; _lpeco_uid=${_lpeco_rest%%|*}; _lpeco_gid=${_lpeco_rest#*|}
   _lpeco_caps=$(getcap -n -- "$_lpeco_path" 2>/dev/null); _lpeco_caps=${_lpeco_caps#* }
@@ -59,9 +68,10 @@ while IFS= read -r _lpeco_path; do
 done
 if command -v getcap >/dev/null 2>&1; then
   _lpeco_cap_count=0
-  getcap -r "$1" 2>/dev/null | while IFS=' ' read -r _lpeco_path _lpeco_caps; do
+  getcap -r "$_lpeco_root" 2>/dev/null | while IFS=' ' read -r _lpeco_path _lpeco_caps; do
     [ -n "$_lpeco_caps" ] || continue
-    _lpeco_cap_count=$((_lpeco_cap_count + 1)); [ "$_lpeco_cap_count" -le "$2" ] || break
+    _lpeco_excluded "$_lpeco_path" "$@" && continue
+    _lpeco_cap_count=$((_lpeco_cap_count + 1)); [ "$_lpeco_cap_count" -le "$_lpeco_limit" ] || break
     _lpeco_meta=$(stat -c '%d:%i|%f|%u|%g' -- "$_lpeco_path" 2>/dev/null) || continue
     _lpeco_dev=${_lpeco_meta%%|*}; _lpeco_rest=${_lpeco_meta#*|}; _lpeco_mode=${_lpeco_rest%%|*}; _lpeco_rest=${_lpeco_rest#*|}; _lpeco_uid=${_lpeco_rest%%|*}; _lpeco_gid=${_lpeco_rest#*|}
     printf 'FILE\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(_lpeco_hex "$_lpeco_path")" "$_lpeco_dev" "$_lpeco_mode" "$_lpeco_uid" "$_lpeco_gid" "$(_lpeco_hex "$_lpeco_caps")"
@@ -82,12 +92,25 @@ esac`
 const packageUnknownScript = `printf 'LPECO_PACKAGE_V1\nMANAGER\tunknown\npackage manager unavailable\n'`
 
 func PrivilegedDefinition(root string, limit int) probe.Definition {
+	return PrivilegedDefinitionWithExcludes(root, nil, limit)
+}
+
+func PrivilegedDefinitionWithExcludes(root string, excludes []string, limit int) probe.Definition {
 	if limit <= 0 {
 		limit = 10000
 	}
+	excludes = unique(excludes)
+	sort.Strings(excludes)
+	arguments := []string{root, strconv.Itoa(limit)}
+	arguments = append(arguments, excludes...)
+	walkID, _ := model.StableID("walk", struct {
+		Root     string
+		Excludes []string
+		Limit    int
+	}{root, excludes, limit})
 	return probe.Definition{
-		ID: "binary.privileged." + stableSuffix(root), Collector: "binary", Parser: "privileged-v1", RedactionPolicy: "paths", SafetyClass: model.PassiveRead,
-		Variants: []probe.Variant{{ID: "find", Command: adapter.Command{Script: privilegedScript, Args: []string{root, strconv.Itoa(limit)}}, Requirements: []probe.Requirement{probe.CommandRequirement("find")}}},
+		ID: "binary.privileged." + walkID, Collector: "binary", Parser: "privileged-v1", RedactionPolicy: "paths", SafetyClass: model.PassiveRead,
+		Variants: []probe.Variant{{ID: "find", Command: adapter.Command{Script: privilegedScript, Args: arguments}, Requirements: []probe.Requirement{probe.CommandRequirement("find")}}},
 		Timeout:  60 * time.Second, MaxOutput: 16 * 1024 * 1024, Produces: []string{"privileged_binary"}, Idempotent: true,
 	}
 }
@@ -231,12 +254,22 @@ func PlanWalk(mounts []pathcollect.MountObservation, options WalkOptions) []Walk
 	return targets
 }
 
-type Collector struct{}
+type Collector struct {
+	WalkOptions WalkOptions
+}
 
 func (Collector) ID() string { return "binary" }
 
-func (Collector) Plan(_ model.HostProfile, discovery collect.Discovery) []probe.Definition {
-	definitions := []probe.Definition{SudoersDefinition(), SudoListDefinition(), PrivilegedDefinition("/", 10000)}
+func (collector Collector) Plan(_ model.HostProfile, discovery collect.Discovery) []probe.Definition {
+	definitions := []probe.Definition{SudoersDefinition(), SudoListDefinition()}
+	roots := unique(collector.WalkOptions.Roots)
+	if len(roots) == 0 {
+		roots = []string{"/"}
+	}
+	sort.Strings(roots)
+	for _, root := range roots {
+		definitions = append(definitions, PrivilegedDefinitionWithExcludes(root, collector.WalkOptions.Excludes, collector.WalkOptions.Limit))
+	}
 	paths := append([]string(nil), discovery.ReferencedPaths...)
 	sort.Strings(paths)
 	paths = unique(paths)
