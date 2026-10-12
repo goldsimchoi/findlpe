@@ -1,0 +1,6 @@
+[Unit]
+Description=Demo service
+[Service]
+User=daemon
+EnvironmentFile=/etc/default/demo
+ExecStart=/usr/bin/demo --old

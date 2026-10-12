@@ -1,0 +1,5 @@
+[Unit]
+Description=RHEL demo service
+[Service]
+User=nobody
+ExecStart=/usr/local/bin/demo --rhel

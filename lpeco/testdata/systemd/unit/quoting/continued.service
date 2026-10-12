@@ -1,0 +1,11 @@
+# top-level comment
+[Unit]
+Description=Demo \
+ service
+; another comment
+[Service]
+Environment="ONE=hello world" TWO=plain
+Environment=THREE=first
+Environment=THREE=second
+ExecStart=/usr/bin/demo "quoted arg" 'single arg' escaped\ space semi;colon
+BrokenLine
