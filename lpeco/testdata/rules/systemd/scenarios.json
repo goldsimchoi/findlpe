@@ -1,0 +1,256 @@
+{
+  "cases": [
+    {
+      "name": "writable-source-positive",
+      "rule_id": "systemd.writable-unit-source",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P0",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service","attributes":{"name":"demo.service","manager":"system"}},
+        {"key":"source","kind":"File","label":"/etc/systemd/system/demo.service","attributes":{"path":"/etc/systemd/system/demo.service"}},
+        {"key":"trigger","kind":"Trigger","label":"demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"READS_CONFIG","from":"unit","to":"source","attributes":{"applied":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"source","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "writable-source-same-user",
+      "rule_id": "systemd.writable-unit-source",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"unit","kind":"Unit","label":"user-demo.service"},
+        {"key":"source","kind":"File","label":"/home/u/.config/systemd/user/user-demo.service"},
+        {"key":"trigger","kind":"Trigger","label":"user-demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"attacker"},
+        {"kind":"READS_CONFIG","from":"unit","to":"source","attributes":{"applied":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"source","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "writable-source-unapplied-dropin",
+      "rule_id": "systemd.writable-unit-source",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"source","kind":"File","label":"/tmp/demo.service.d/override.conf"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"READS_CONFIG","from":"unit","to":"source","attributes":{"applied":false}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"source","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "writable-source-trigger-unconfirmed",
+      "rule_id": "systemd.writable-unit-source",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P1",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"source","kind":"File","label":"/etc/systemd/system/demo.service"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"READS_CONFIG","from":"unit","to":"source","attributes":{"applied":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"source","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "writable-exec-positive",
+      "rule_id": "systemd.writable-exec-chain",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P0",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"exec","kind":"Executable","label":"/opt/demo/run","attributes":{"path":"/opt/demo/run"}},
+        {"key":"trigger","kind":"Trigger","label":"demo.path"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"EXECUTES","from":"unit","to":"exec","attributes":{"resolved":true,"valid":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"exec","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "writable-exec-read-only-mount",
+      "rule_id": "systemd.writable-exec-chain",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"exec","kind":"Executable","label":"/opt/demo/run"},
+        {"key":"mount","kind":"Mount","label":"/opt","attributes":{"read_only":true}},
+        {"key":"trigger","kind":"Trigger","label":"demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"EXECUTES","from":"unit","to":"exec","attributes":{"resolved":true,"valid":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"exec","attributes":{"controlled":true}},
+        {"kind":"LOCATED_ON","from":"exec","to":"mount"},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "writable-exec-unresolved-specifier",
+      "rule_id": "systemd.writable-exec-chain",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo@x.service"},
+        {"key":"exec","kind":"Executable","label":"/opt/%i/run"},
+        {"key":"trigger","kind":"Trigger","label":"demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"EXECUTES","from":"unit","to":"exec","attributes":{"resolved":false,"valid":false}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"exec","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "controlled-environment-positive",
+      "rule_id": "systemd.controlled-environment",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P0",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"env","kind":"File","label":"/etc/default/demo"},
+        {"key":"trigger","kind":"Trigger","label":"demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"READS_ENVIRONMENT","from":"unit","to":"env","attributes":{"used":true,"variables":["PATH"]}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"env","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "controlled-environment-unused-file",
+      "rule_id": "systemd.controlled-environment",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"env","kind":"File","label":"/etc/default/demo"},
+        {"key":"trigger","kind":"Trigger","label":"demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"READS_ENVIRONMENT","from":"unit","to":"env","attributes":{"used":false}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"env","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "controlled-environment-same-user",
+      "rule_id": "systemd.controlled-environment",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"unit","kind":"Unit","label":"user-demo.service"},
+        {"key":"env","kind":"File","label":"/home/u/.config/demo.env"},
+        {"key":"trigger","kind":"Trigger","label":"user-demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"attacker"},
+        {"kind":"READS_ENVIRONMENT","from":"unit","to":"env","attributes":{"used":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"env","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "controlled-search-path-positive",
+      "rule_id": "systemd.controlled-search-path",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P0",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"command","kind":"Executable","label":"helper"},
+        {"key":"dir","kind":"Directory","label":"/opt/demo/bin"},
+        {"key":"trigger","kind":"Trigger","label":"demo.timer"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"EXECUTES","from":"unit","to":"command","attributes":{"simple":true,"resolved":true,"valid":true}},
+        {"kind":"RESOLVES_THROUGH","from":"unit","to":"dir","attributes":{"search_path":true,"index":0,"resolved":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"dir","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"unit","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "controlled-search-path-unresolved-specifier",
+      "rule_id": "systemd.controlled-search-path",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo@x.service"},
+        {"key":"command","kind":"Executable","label":"helper"},
+        {"key":"dir","kind":"Directory","label":"/opt/%i/bin"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"EXECUTES","from":"unit","to":"command","attributes":{"simple":true,"resolved":false,"valid":false}},
+        {"kind":"RESOLVES_THROUGH","from":"unit","to":"dir","attributes":{"search_path":true,"index":0,"resolved":false}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"dir","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "controlled-search-path-read-only",
+      "rule_id": "systemd.controlled-search-path",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"unit","kind":"Unit","label":"demo.service"},
+        {"key":"command","kind":"Executable","label":"helper"},
+        {"key":"dir","kind":"Directory","label":"/opt/demo/bin"},
+        {"key":"mount","kind":"Mount","label":"/opt","attributes":{"read_only":true}}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"unit","to":"root"},
+        {"kind":"EXECUTES","from":"unit","to":"command","attributes":{"simple":true,"resolved":true,"valid":true}},
+        {"kind":"RESOLVES_THROUGH","from":"unit","to":"dir","attributes":{"search_path":true,"index":0,"resolved":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"dir","attributes":{"controlled":true}},
+        {"kind":"LOCATED_ON","from":"dir","to":"mount"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "cases": [
+    {
+      "name": "replaceable-dependency-positive",
+      "rule_id": "process.replaceable-dependency",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P0",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"process","kind":"Process","label":"daemon[101]"},
+        {"key":"library","kind":"Library","label":"/opt/demo/lib/plugin.so"},
+        {"key":"trigger","kind":"Trigger","label":"demo.service restart"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"process","to":"root"},
+        {"kind":"LOADS","from":"process","to":"library","attributes":{"resolved":true,"observed":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"library","attributes":{"controlled":true}},
+        {"kind":"ACTIVATES","from":"trigger","to":"process","attributes":{"active":true}}
+      ]
+    },
+    {
+      "name": "replaceable-dependency-trigger-unconfirmed",
+      "rule_id": "process.replaceable-dependency",
+      "current": "attacker",
+      "want_count": 1,
+      "want_priority": "P1",
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"process","kind":"Process","label":"daemon[101]"},
+        {"key":"library","kind":"Library","label":"/opt/demo/lib/plugin.so"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"process","to":"root"},
+        {"kind":"LOADS","from":"process","to":"library","attributes":{"resolved":true,"observed":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"library","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "replaceable-dependency-same-user",
+      "rule_id": "process.replaceable-dependency",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"process","kind":"Process","label":"user-daemon[501]"},
+        {"key":"library","kind":"Library","label":"/home/u/plugin.so"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"process","to":"attacker"},
+        {"kind":"LOADS","from":"process","to":"library","attributes":{"resolved":true,"observed":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"library","attributes":{"controlled":true}}
+      ]
+    },
+    {
+      "name": "replaceable-dependency-unresolved",
+      "rule_id": "process.replaceable-dependency",
+      "current": "attacker",
+      "want_count": 0,
+      "nodes": [
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"process","kind":"Process","label":"daemon[101]"},
+        {"key":"library","kind":"Library","label":"libplugin.so"}
+      ],
+      "edges": [
+        {"kind":"RUNS_AS","from":"process","to":"root"},
+        {"kind":"LOADS","from":"process","to":"library","attributes":{"resolved":false,"observed":true}},
+        {"kind":"CAN_WRITE","from":"attacker","to":"library","attributes":{"controlled":true}}
+      ]
+    }
+  ]
+}
