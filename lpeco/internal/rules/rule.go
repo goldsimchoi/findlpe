@@ -14,13 +14,7 @@ type Metadata struct {
 	Description string `json:"description"`
 }
 
-type Diagnostic struct {
-	Code        string        `json:"code"`
-	RuleID      string        `json:"rule_id"`
-	Message     string        `json:"message"`
-	Node        model.NodeRef `json:"node"`
-	EvidenceIDs []string      `json:"evidence_ids"`
-}
+type Diagnostic = model.RuleDiagnostic
 
 type Evaluation struct {
 	Candidates  []model.Candidate `json:"candidates"`

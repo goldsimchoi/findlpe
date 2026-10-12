@@ -89,8 +89,14 @@ func executeNewScan(ctx context.Context, configuration Config, _ io.Reader, stdo
 		_, _ = fmt.Fprintf(stderr, "lpeco: %s\n", redact.String(err.Error()))
 		return ExitOperation
 	}
-	result, runErr := orchestrator.Run(ctx, transport, sessionStore, scanOptions(configuration, sessionID))
-	showObservablePreview(stderr, result.ObservablePreview, configuration.Common.ObservableRead)
+	options := scanOptions(configuration, sessionID)
+	if configuration.Common.ObservableRead {
+		options.BeforeObservable = func(probes []string) error { return showObservablePreview(stderr, probes, true) }
+	}
+	result, runErr := orchestrator.Run(ctx, transport, sessionStore, options)
+	if !configuration.Common.ObservableRead {
+		_ = showObservablePreview(stderr, result.ObservablePreview, false)
+	}
 	if reportErr := writeStoredReport(ctx, sessionStore, sessionID, "terminal", stdout); reportErr != nil {
 		_, _ = fmt.Fprintf(stderr, "lpeco: report: %s\n", redact.String(reportErr.Error()))
 		if runErr == nil {
@@ -115,8 +121,14 @@ func executeResume(ctx context.Context, configuration Config, stdout, stderr io.
 		_, _ = fmt.Fprintf(stderr, "lpeco: %s\n", redact.String(err.Error()))
 		return ExitOperation
 	}
-	result, runErr := orchestrator.Resume(ctx, transport, sessionStore, scanOptions(configuration, configuration.ResumeSessionID))
-	showObservablePreview(stderr, result.ObservablePreview, configuration.Common.ObservableRead)
+	options := scanOptions(configuration, configuration.ResumeSessionID)
+	if configuration.Common.ObservableRead {
+		options.BeforeObservable = func(probes []string) error { return showObservablePreview(stderr, probes, true) }
+	}
+	result, runErr := orchestrator.Resume(ctx, transport, sessionStore, options)
+	if !configuration.Common.ObservableRead {
+		_ = showObservablePreview(stderr, result.ObservablePreview, false)
+	}
 	if reportErr := writeStoredReport(ctx, sessionStore, configuration.ResumeSessionID, "terminal", stdout); reportErr != nil {
 		_, _ = fmt.Fprintf(stderr, "lpeco: report: %s\n", redact.String(reportErr.Error()))
 		if runErr == nil {
@@ -155,7 +167,7 @@ func buildTransport(ctx context.Context, configuration Config, stderr io.Writer)
 		return sshtransport.New(sshConfiguration)
 	case ModeScanBridge:
 		if configuration.Bridge.Protocol == "jsonrpc" {
-			return plugin.Start(ctx, configuration.Bridge.Command, plugin.Options{})
+			return plugin.Start(ctx, configuration.Bridge.Command, plugin.Options{MaxOutputBytes: configuration.Common.MaxOutput})
 		}
 		connection, err := raw.StartBridge(ctx, configuration.Bridge.Command)
 		if err != nil {
@@ -173,7 +185,7 @@ func scanOptions(configuration Config, sessionID string) orchestrator.Options {
 	return orchestrator.Options{
 		SessionID: sessionID, TransportKind: transportName(configuration), Target: targetName(configuration),
 		Collectors: configuredCollectors(configuration.Common), Full: configuration.Common.Full,
-		ObservableRead: configuration.Common.ObservableRead,
+		ObservableRead: configuration.Common.ObservableRead, ProcessObservation: configuration.Common.Observe,
 	}
 }
 
@@ -238,15 +250,16 @@ func newSessionID() (string, error) {
 	return "scan-" + time.Now().UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(random), nil
 }
 
-func showObservablePreview(destination io.Writer, probes []string, enabled bool) {
+func showObservablePreview(destination io.Writer, probes []string, enabled bool) error {
 	if len(probes) == 0 {
-		return
+		return nil
 	}
 	if enabled {
-		_, _ = fmt.Fprintf(destination, "observable-read probes enabled: %s\n", strings.Join(probes, ", "))
-		return
+		_, err := fmt.Fprintf(destination, "observable-read probes enabled: %s\n", strings.Join(probes, ", "))
+		return err
 	}
-	_, _ = fmt.Fprintf(destination, "observable-read probes skipped (rerun with --observable-read): %s\n", strings.Join(probes, ", "))
+	_, err := fmt.Fprintf(destination, "observable-read probes skipped (rerun with --observable-read): %s\n", strings.Join(probes, ", "))
+	return err
 }
 
 func Usage() string {

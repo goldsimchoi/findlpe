@@ -13,12 +13,7 @@ import (
 
 // Diagnostic describes graph input that could not be represented without
 // guessing. Facts remain available through Facts even when an edge is rejected.
-type Diagnostic struct {
-	Code        string   `json:"code"`
-	Message     string   `json:"message"`
-	FactID      string   `json:"fact_id,omitempty"`
-	EvidenceIDs []string `json:"evidence_ids"`
-}
+type Diagnostic = model.GraphDiagnostic
 
 type NodeSpec struct {
 	Key             string

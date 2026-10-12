@@ -57,7 +57,9 @@ _lpeco_excluded() {
   return 1
 }
 _lpeco_count=0
-find "$_lpeco_root" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null |
+find "$_lpeco_root" -xdev \
+  \( -type d -exec sh -c '_lpeco_candidate=$1; shift; for _lpeco_prefix do case "$_lpeco_candidate" in "$_lpeco_prefix"|"$_lpeco_prefix"/*) exit 0;; esac; done; exit 1' lpeco-find {} /proc /sys /dev /run "$@" \; -prune \) -o \
+  -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null |
 while IFS= read -r _lpeco_path; do
   _lpeco_excluded "$_lpeco_path" "$@" && continue
   _lpeco_count=$((_lpeco_count + 1)); [ "$_lpeco_count" -le "$_lpeco_limit" ] || break
@@ -68,9 +70,14 @@ while IFS= read -r _lpeco_path; do
 done
 if command -v getcap >/dev/null 2>&1; then
   _lpeco_cap_count=0
-  getcap -r "$_lpeco_root" 2>/dev/null | while IFS=' ' read -r _lpeco_path _lpeco_caps; do
-    [ -n "$_lpeco_caps" ] || continue
+  find "$_lpeco_root" -xdev \
+    \( -type d -exec sh -c '_lpeco_candidate=$1; shift; for _lpeco_prefix do case "$_lpeco_candidate" in "$_lpeco_prefix"|"$_lpeco_prefix"/*) exit 0;; esac; done; exit 1' lpeco-find {} /proc /sys /dev /run "$@" \; -prune \) -o \
+    -type f -print 2>/dev/null |
+  while IFS= read -r _lpeco_path; do
     _lpeco_excluded "$_lpeco_path" "$@" && continue
+    _lpeco_cap_line=$(getcap -n -- "$_lpeco_path" 2>/dev/null)
+    _lpeco_caps=${_lpeco_cap_line#"$_lpeco_path"}; _lpeco_caps=${_lpeco_caps# }
+    [ -n "$_lpeco_caps" ] || continue
     _lpeco_cap_count=$((_lpeco_cap_count + 1)); [ "$_lpeco_cap_count" -le "$_lpeco_limit" ] || break
     _lpeco_meta=$(stat -c '%d:%i|%f|%u|%g' -- "$_lpeco_path" 2>/dev/null) || continue
     _lpeco_dev=${_lpeco_meta%%|*}; _lpeco_rest=${_lpeco_meta#*|}; _lpeco_mode=${_lpeco_rest%%|*}; _lpeco_rest=${_lpeco_rest#*|}; _lpeco_uid=${_lpeco_rest%%|*}; _lpeco_gid=${_lpeco_rest#*|}
@@ -78,15 +85,31 @@ if command -v getcap >/dev/null 2>&1; then
   done
 fi`
 
-const elfReadelfScript = `printf 'SHEBANG='; sed -n '1p' -- "$1" 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; printf '\n'; LC_ALL=C readelf -l -d -- "$1" 2>/dev/null`
-const elfObjdumpScript = `printf 'SHEBANG='; sed -n '1p' -- "$1" 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; printf '\n'; LC_ALL=C objdump -p -- "$1" 2>/dev/null`
+const elfReadelfScript = `[ -r "$1" ] || exit 75
+printf 'SHEBANG='; sed -n '1p' -- "$1" 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; printf '\n'
+LC_ALL=C readelf -l -d -- "$1" 2>/dev/null && exit 0
+_lpeco_magic=$(dd if="$1" bs=4 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n')
+[ "$_lpeco_magic" != 7f454c46 ] || exit 75
+exit 0`
+const elfObjdumpScript = `[ -r "$1" ] || exit 75
+printf 'SHEBANG='; sed -n '1p' -- "$1" 2>/dev/null | od -An -v -tx1 | tr -d ' \n'; printf '\n'
+LC_ALL=C objdump -p -- "$1" 2>/dev/null && exit 0
+_lpeco_magic=$(dd if="$1" bs=4 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n')
+[ "$_lpeco_magic" != 7f454c46 ] || exit 75
+exit 0`
 
 const packageScript = `printf 'LPECO_PACKAGE_V1\nMANAGER\t%s\n' "$1"
+_lpeco_status=0
 case "$1" in
-  dpkg) dpkg-query -S -- "$2" 2>/dev/null ;;
-  rpm) rpm -qf -- "$2" 2>/dev/null ;;
-  apk) apk info --who-owns -- "$2" 2>/dev/null ;;
+  dpkg) dpkg-query -S -- "$2" 2>/dev/null || _lpeco_status=$? ;;
+  rpm) rpm -qf -- "$2" 2>/dev/null || _lpeco_status=$? ;;
+  apk) apk info --who-owns -- "$2" 2>/dev/null || _lpeco_status=$? ;;
   *) exit 64 ;;
+esac
+case "$_lpeco_status" in
+  0) ;;
+  1) printf 'NOT_OWNED\n' ;;
+  *) exit "$_lpeco_status" ;;
 esac`
 
 const packageUnknownScript = `printf 'LPECO_PACKAGE_V1\nMANAGER\tunknown\npackage manager unavailable\n'`
@@ -212,24 +235,14 @@ func PlanWalk(mounts []pathcollect.MountObservation, options WalkOptions) []Walk
 	if limit <= 0 {
 		limit = 10000
 	}
-	rootAllowed := func(mountPoint string) bool {
-		if len(options.Roots) > 0 {
-			allowed := false
-			for _, root := range options.Roots {
-				if pathWithin(mountPoint, root) || pathWithin(root, mountPoint) {
-					allowed = true
-				}
-			}
-			if !allowed {
-				return false
+	excludes := append([]string{"/proc", "/sys", "/dev", "/run"}, options.Excludes...)
+	excluded := func(target string) bool {
+		for _, prefix := range excludes {
+			if pathWithin(target, prefix) {
+				return true
 			}
 		}
-		for _, excluded := range append([]string{"/proc", "/sys", "/dev", "/run"}, options.Excludes...) {
-			if pathWithin(mountPoint, excluded) {
-				return false
-			}
-		}
-		return true
+		return false
 	}
 	ordered := append([]pathcollect.MountObservation(nil), mounts...)
 	sort.Slice(ordered, func(i, j int) bool {
@@ -238,19 +251,84 @@ func PlanWalk(mounts []pathcollect.MountObservation, options WalkOptions) []Walk
 		}
 		return ordered[i].MountPoint < ordered[j].MountPoint
 	})
-	seenDevices := make(map[string]bool)
-	var targets []WalkTarget
+	eligible := make([]pathcollect.MountObservation, 0, len(ordered))
 	for _, mount := range ordered {
-		if mount.Pseudo || mount.Remote || !rootAllowed(mount.MountPoint) {
+		mount.MountPoint = filepath.Clean(mount.MountPoint)
+		if mount.Pseudo || mount.Remote || excluded(mount.MountPoint) {
 			continue
 		}
-		key := mount.MajorMinor + "|" + mount.Root
-		if seenDevices[key] {
-			continue
-		}
-		seenDevices[key] = true
-		targets = append(targets, WalkTarget{Root: filepath.Clean(mount.MountPoint), MajorMinor: mount.MajorMinor, Limit: limit})
+		eligible = append(eligible, mount)
 	}
+	roots := unique(options.Roots)
+	if len(roots) == 0 {
+		roots = []string{"/"}
+	}
+	for index := range roots {
+		roots[index] = filepath.Clean(roots[index])
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		if len(roots[i]) != len(roots[j]) {
+			return len(roots[i]) < len(roots[j])
+		}
+		return roots[i] < roots[j]
+	})
+	containedRoots := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if excluded(root) {
+			continue
+		}
+		covered := false
+		for _, existing := range containedRoots {
+			if pathWithin(root, existing) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			containedRoots = append(containedRoots, root)
+		}
+	}
+	seenTargets := make(map[string]bool)
+	seenFullDevices := make(map[string]bool)
+	var targets []WalkTarget
+	add := func(mount pathcollect.MountObservation, root string) {
+		root = filepath.Clean(root)
+		deviceKey := mount.MajorMinor + "|" + mount.Root
+		if root == mount.MountPoint && seenFullDevices[deviceKey] {
+			return
+		}
+		targetKey := deviceKey + "|" + root
+		if seenTargets[targetKey] {
+			return
+		}
+		seenTargets[targetKey] = true
+		if root == mount.MountPoint {
+			seenFullDevices[deviceKey] = true
+		}
+		targets = append(targets, WalkTarget{Root: root, MajorMinor: mount.MajorMinor, Limit: limit})
+	}
+	for _, root := range containedRoots {
+		containing := -1
+		for index, mount := range eligible {
+			if pathWithin(root, mount.MountPoint) && (containing < 0 || len(mount.MountPoint) > len(eligible[containing].MountPoint)) {
+				containing = index
+			}
+		}
+		if containing >= 0 {
+			add(eligible[containing], root)
+		}
+		for _, mount := range eligible {
+			if pathWithin(mount.MountPoint, root) {
+				add(mount, mount.MountPoint)
+			}
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Root != targets[j].Root {
+			return targets[i].Root < targets[j].Root
+		}
+		return targets[i].MajorMinor < targets[j].MajorMinor
+	})
 	return targets
 }
 
@@ -262,13 +340,26 @@ func (Collector) ID() string { return "binary" }
 
 func (collector Collector) Plan(_ model.HostProfile, discovery collect.Discovery) []probe.Definition {
 	definitions := []probe.Definition{SudoersDefinition(), SudoListDefinition()}
-	roots := unique(collector.WalkOptions.Roots)
-	if len(roots) == 0 {
-		roots = []string{"/"}
-	}
-	sort.Strings(roots)
-	for _, root := range roots {
-		definitions = append(definitions, PrivilegedDefinitionWithExcludes(root, collector.WalkOptions.Excludes, collector.WalkOptions.Limit))
+	if len(discovery.Mounts) > 0 {
+		mounts := make([]pathcollect.MountObservation, 0, len(discovery.Mounts))
+		for _, mount := range discovery.Mounts {
+			mounts = append(mounts, pathcollect.MountObservation{
+				ID: mount.ID, MajorMinor: mount.MajorMinor, Root: mount.Root, MountPoint: mount.MountPoint,
+				Bind: mount.Bind, Remote: mount.Remote, Pseudo: mount.Pseudo,
+			})
+		}
+		for _, target := range PlanWalk(mounts, collector.WalkOptions) {
+			definitions = append(definitions, PrivilegedDefinitionWithExcludes(target.Root, collector.WalkOptions.Excludes, target.Limit))
+		}
+	} else {
+		roots := unique(collector.WalkOptions.Roots)
+		if len(roots) == 0 {
+			roots = []string{"/"}
+		}
+		sort.Strings(roots)
+		for _, root := range roots {
+			definitions = append(definitions, PrivilegedDefinitionWithExcludes(root, collector.WalkOptions.Excludes, collector.WalkOptions.Limit))
+		}
 	}
 	paths := append([]string(nil), discovery.ReferencedPaths...)
 	sort.Strings(paths)

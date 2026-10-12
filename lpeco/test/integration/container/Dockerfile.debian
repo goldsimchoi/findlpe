@@ -1,0 +1,17 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       acl binutils ca-certificates findutils libcap2-bin passwd procps \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY lpeco /usr/local/bin/lpeco
+COPY fixture.sh /usr/local/libexec/lpeco-fixture
+
+ENV LPECO_FIXTURE_KIND=debian LPECO_DISPOSABLE_FIXTURE=confirmed
+RUN chmod 0755 /usr/local/bin/lpeco /usr/local/libexec/lpeco-fixture \
+    && useradd --create-home --uid 1000 --shell /bin/sh lpeco \
+    && /usr/local/libexec/lpeco-fixture setup
+
+ENTRYPOINT ["/usr/local/libexec/lpeco-fixture"]
+CMD ["verify"]

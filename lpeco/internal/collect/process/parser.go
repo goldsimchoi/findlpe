@@ -46,6 +46,7 @@ type EnvironmentValue struct {
 
 type EnvironmentFact struct {
 	PID          int                         `json:"pid"`
+	StartTime    uint64                      `json:"start_time"`
 	Values       map[string]EnvironmentValue `json:"values"`
 	MissingFacts []string                    `json:"missing_facts"`
 	EvidenceIDs  []string                    `json:"evidence_ids"`
@@ -53,6 +54,7 @@ type EnvironmentFact struct {
 
 type ProcessDependencyFact struct {
 	PID          int      `json:"pid"`
+	StartTime    uint64   `json:"start_time"`
 	OpenFiles    []string `json:"open_files"`
 	MappedFiles  []string `json:"mapped_files"`
 	MissingFacts []string `json:"missing_facts"`
@@ -238,10 +240,15 @@ func finalizeProcess(process *ProcessFact) {
 }
 
 func ParseEnvironment(input []byte, pid int, evidenceID string) (EnvironmentFact, error) {
+	return ParseEnvironmentIdentity(input, pid, 0, evidenceID)
+}
+
+func ParseEnvironmentIdentity(input []byte, pid int, expectedStart uint64, evidenceID string) (EnvironmentFact, error) {
 	result := EnvironmentFact{PID: pid, Values: make(map[string]EnvironmentValue), EvidenceIDs: []string{evidenceID}}
 	scanner := bufio.NewScanner(bytes.NewReader(input))
 	header := false
 	lineNumber := 0
+	var before, after uint64
 	for scanner.Scan() {
 		lineNumber++
 		fields := strings.Split(strings.TrimSuffix(scanner.Text(), "\r"), "\t")
@@ -252,7 +259,11 @@ func ParseEnvironment(input []byte, pid int, evidenceID string) (EnvironmentFact
 			header = true
 			continue
 		}
-		if len(fields) >= 3 && fields[0] == "ENV" {
+		if len(fields) == 2 && fields[0] == "STARTTIME" {
+			before, _ = strconv.ParseUint(fields[1], 10, 64)
+		} else if len(fields) == 2 && fields[0] == "END_STARTTIME" {
+			after, _ = strconv.ParseUint(fields[1], 10, 64)
+		} else if len(fields) >= 3 && fields[0] == "ENV" {
 			key, err := decodeHex(fields[1])
 			if err != nil {
 				return EnvironmentFact{}, fmt.Errorf("line %d key: %w", lineNumber, err)
@@ -274,14 +285,20 @@ func ParseEnvironment(input []byte, pid int, evidenceID string) (EnvironmentFact
 	if !header || evidenceID == "" {
 		return EnvironmentFact{}, errors.New("environment header and evidence ID are required")
 	}
+	result.StartTime = verifiedStartTime(before, after, expectedStart, &result.MissingFacts)
 	return result, nil
 }
 
 func ParseDependencies(input []byte, pid int, evidenceID string) (ProcessDependencyFact, error) {
+	return ParseDependenciesIdentity(input, pid, 0, evidenceID)
+}
+
+func ParseDependenciesIdentity(input []byte, pid int, expectedStart uint64, evidenceID string) (ProcessDependencyFact, error) {
 	result := ProcessDependencyFact{PID: pid, EvidenceIDs: []string{evidenceID}}
 	scanner := bufio.NewScanner(bytes.NewReader(input))
 	header := false
 	lineNumber := 0
+	var before, after uint64
 	for scanner.Scan() {
 		lineNumber++
 		fields := strings.Split(strings.TrimSuffix(scanner.Text(), "\r"), "\t")
@@ -293,6 +310,10 @@ func ParseDependencies(input []byte, pid int, evidenceID string) (ProcessDepende
 			continue
 		}
 		switch {
+		case len(fields) == 2 && fields[0] == "STARTTIME":
+			before, _ = strconv.ParseUint(fields[1], 10, 64)
+		case len(fields) == 2 && fields[0] == "END_STARTTIME":
+			after, _ = strconv.ParseUint(fields[1], 10, 64)
 		case len(fields) == 3 && fields[0] == "FD":
 			path, err := decodeHex(fields[2])
 			if err != nil {
@@ -315,7 +336,27 @@ func ParseDependencies(input []byte, pid int, evidenceID string) (ProcessDepende
 	if !header || evidenceID == "" {
 		return ProcessDependencyFact{}, errors.New("dependency header and evidence ID are required")
 	}
+	result.StartTime = verifiedStartTime(before, after, expectedStart, &result.MissingFacts)
 	return result, nil
+}
+
+func verifiedStartTime(before, after, expected uint64, missing *[]string) uint64 {
+	if before == 0 && after == 0 && expected == 0 {
+		return 0
+	}
+	if before == 0 || after == 0 {
+		*missing = append(*missing, "process start time verification unavailable")
+		return 0
+	}
+	if before != after {
+		*missing = append(*missing, "process identity changed during collection")
+		return 0
+	}
+	if expected != 0 && before != expected {
+		*missing = append(*missing, "process identity differs from discovery snapshot")
+		return before
+	}
+	return before
 }
 
 func EnvironmentFacts(environment EnvironmentFact) ([]model.Fact, error) {
@@ -324,9 +365,10 @@ func EnvironmentFacts(environment EnvironmentFact) ([]model.Fact, error) {
 		return nil, err
 	}
 	id, err := model.StableID("fact", struct {
-		PID  int
-		Kind string
-	}{environment.PID, "environment"})
+		PID   int
+		Start uint64
+		Kind  string
+	}{environment.PID, environment.StartTime, "environment"})
 	if err != nil {
 		return nil, err
 	}
@@ -343,9 +385,10 @@ func DependencyFacts(dependencies ProcessDependencyFact) ([]model.Fact, error) {
 		return nil, err
 	}
 	id, err := model.StableID("fact", struct {
-		PID  int
-		Kind string
-	}{dependencies.PID, "dependencies"})
+		PID   int
+		Start uint64
+		Kind  string
+	}{dependencies.PID, dependencies.StartTime, "dependencies"})
 	if err != nil {
 		return nil, err
 	}
@@ -364,9 +407,10 @@ func Facts(processes []ProcessFact) ([]model.Fact, error) {
 			return nil, err
 		}
 		id, err := model.StableID("fact", struct {
-			PID   int
-			Start uint64
-		}{process.PID, process.StartTime})
+			PID      int
+			Start    uint64
+			Evidence []string
+		}{process.PID, process.StartTime, process.EvidenceIDs})
 		if err != nil {
 			return nil, err
 		}
@@ -380,9 +424,11 @@ func Facts(processes []ProcessFact) ([]model.Fact, error) {
 				return nil, err
 			}
 			cgroupID, err := model.StableID("fact", struct {
-				PID  int
-				Path string
-			}{process.PID, cgroup.Path})
+				PID      int
+				Start    uint64
+				Path     string
+				Evidence []string
+			}{process.PID, process.StartTime, cgroup.Path, process.EvidenceIDs})
 			if err != nil {
 				return nil, err
 			}

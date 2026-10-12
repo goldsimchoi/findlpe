@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 )
 
 type frameResult struct {
@@ -14,7 +15,17 @@ type frameResult struct {
 	Truncated bool
 }
 
+type frameProgress struct {
+	mu        sync.Mutex
+	output    []byte
+	truncated bool
+}
+
 func parseFrame(source io.Reader, nonce string, maxOutput int) (frameResult, error) {
+	return parseFrameWithProgress(source, nonce, maxOutput, nil)
+}
+
+func parseFrameWithProgress(source io.Reader, nonce string, maxOutput int, progress *frameProgress) (frameResult, error) {
 	reader := bufio.NewReader(source)
 	if err := seekMarker(reader, startMarker(nonce)); err != nil {
 		return frameResult{}, err
@@ -27,7 +38,7 @@ func parseFrame(source io.Reader, nonce string, maxOutput int) (frameResult, err
 	for {
 		value, err := reader.ReadByte()
 		if err != nil {
-			flushOutput(&result, pending, maxOutput)
+			flushFrameOutput(&result, progress, pending, maxOutput)
 			if err == io.EOF {
 				return result, ErrMissingEnd
 			}
@@ -35,7 +46,7 @@ func parseFrame(source io.Reader, nonce string, maxOutput int) (frameResult, err
 		}
 		pending = append(pending, value)
 		for len(pending) > 0 && !bytes.HasPrefix(end, pending) {
-			flushOutput(&result, pending[:1], maxOutput)
+			flushFrameOutput(&result, progress, pending[:1], maxOutput)
 			pending = pending[1:]
 		}
 		if len(pending) != len(end) {
@@ -54,6 +65,28 @@ func parseFrame(source io.Reader, nonce string, maxOutput int) (frameResult, err
 		result.ExitCode = exitCode
 		return result, nil
 	}
+}
+
+func flushFrameOutput(result *frameResult, progress *frameProgress, values []byte, limit int) {
+	flushOutput(result, values, limit)
+	if progress != nil {
+		progress.append(values, limit)
+	}
+}
+
+func (p *frameProgress) append(values []byte, limit int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := frameResult{Output: p.output, Truncated: p.truncated}
+	flushOutput(&result, values, limit)
+	p.output = result.Output
+	p.truncated = result.Truncated
+}
+
+func (p *frameProgress) snapshot() ([]byte, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]byte(nil), p.output...), p.truncated
 }
 
 func seekMarker(reader *bufio.Reader, marker []byte) error {

@@ -16,6 +16,10 @@ Notice: Candidate ranking is a triage aid and does not prove successful privileg
   evidence: evidence-z
   missing facts: repeatable process trigger not confirmed
 
+Diagnostics:
+- graph/fixture-graph: graph TOKEN=[REDACTED] (evidence: evidence-z)
+- rule/fixture/fixture-rule: rule TOKEN=[REDACTED] (evidence: evidence-a)
+
 Observation limitations:
 - Candidate ranking does not prove successful privilege escalation.
 - Read-only observations can be incomplete when permissions deny access.

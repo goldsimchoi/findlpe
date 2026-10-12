@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	"github.com/normalone/lpeco/internal/collect/context"
+	"github.com/normalone/lpeco/internal/collect/process"
 	"github.com/normalone/lpeco/internal/collect/systemd"
 	"github.com/normalone/lpeco/internal/model"
+	"github.com/normalone/lpeco/internal/systemdunit"
 )
 
 func TestGraphStableNodeDedupAndDeterministicSerialization(t *testing.T) {
@@ -46,6 +48,23 @@ func TestGraphStableNodeDedupAndDeterministicSerialization(t *testing.T) {
 	}
 }
 
+func TestGraphDoesNotGuessSystemdMainPIDAcrossPIDReuse(t *testing.T) {
+	facts := []model.Fact{
+		makeFact(t, "process", "process", "e-old", model.ConfidenceHigh, process.ProcessFact{PID: 42, StartTime: 100, Name: "old", UIDs: [4]int{0, 0, 0, 0}, GIDs: [4]int{0, 0, 0, 0}, EvidenceIDs: []string{"e-old"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "process", "process", "e-new", model.ConfidenceHigh, process.ProcessFact{PID: 42, StartTime: 200, Name: "new", UIDs: [4]int{0, 0, 0, 0}, GIDs: [4]int{0, 0, 0, 0}, EvidenceIDs: []string{"e-new"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "systemd_unit", "systemd", "e-unit", model.ConfidenceHigh, systemd.UnitFact{Name: "demo.service", Manager: "system", UID: 0, GID: 0, User: "root", MainPID: 42, EvidenceIDs: []string{"e-unit"}, Confidence: model.ConfidenceHigh}),
+	}
+	built, diagnostics := Build(facts)
+	for _, processNode := range built.NodesByKind(model.NodeProcess) {
+		if edges := built.Outgoing(processNode.NodeRef, model.EdgeManagedBy); len(edges) != 0 {
+			t.Fatalf("ambiguous PID was linked to unit: %#v", edges)
+		}
+	}
+	if !hasDiagnosticCode(diagnostics, "ambiguous-process") {
+		t.Fatalf("PID reuse diagnostic missing: %#v", diagnostics)
+	}
+}
+
 func TestGraphRejectsEvidenceLessEdgesAndPreservesConflictingPartialFacts(t *testing.T) {
 	unitHigh := systemd.UnitFact{Name: "demo.service", Manager: "system", UID: 0, User: "root", EvidenceIDs: []string{"e-runtime"}, Confidence: model.ConfidenceHigh}
 	unitPartial := systemd.UnitFact{Name: "demo.service", Manager: "system", UID: 42, User: "service", MissingFacts: []string{"runtime properties unavailable"}, EvidenceIDs: []string{"e-files"}, Confidence: model.ConfidenceMedium}
@@ -69,6 +88,76 @@ func TestGraphRejectsEvidenceLessEdgesAndPreservesConflictingPartialFacts(t *tes
 		if len(edge.EvidenceIDs) == 0 {
 			t.Fatalf("evidence-less edge retained: %#v", edge)
 		}
+	}
+}
+
+func TestGraphScopesSameNamedSystemAndUserUnitsWithoutCrossAttachment(t *testing.T) {
+	facts := []model.Fact{
+		makeFact(t, "identity", "context", "e-identity", model.ConfidenceHigh, context.IdentityFact{UIDs: [4]int{1000, 1000, 1000, 1000}, GIDs: [4]int{1000, 1000, 1000, 1000}}),
+		makeFact(t, "systemd_unit", "systemd", "e-system", model.ConfidenceHigh, systemd.UnitFact{Name: "demo.service", Manager: "system", ManagerUID: 0, UID: 0, User: "root", EvidenceIDs: []string{"e-system"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "systemd_unit", "systemd", "e-user", model.ConfidenceHigh, systemd.UnitFact{Name: "demo.service", Manager: "user", ManagerUID: 1000, UID: 1000, User: "user", InventoryOnly: true, EvidenceIDs: []string{"e-user"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "systemd_exec", "systemd", "e-system-exec", model.ConfidenceHigh, systemd.ExecFact{UnitName: "demo.service", Manager: "system", ManagerUID: 0, Directive: "ExecStart", Command: systemdunit.ExecCommand{Executable: "/opt/system", Valid: true}, EvidenceIDs: []string{"e-system-exec"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "systemd_exec", "systemd", "e-user-exec", model.ConfidenceHigh, systemd.ExecFact{UnitName: "demo.service", Manager: "user", ManagerUID: 1000, Directive: "ExecStart", Command: systemdunit.ExecCommand{Executable: "/opt/user", Valid: true}, EvidenceIDs: []string{"e-user-exec"}, Confidence: model.ConfidenceHigh}),
+	}
+	built, diagnostics := Build(facts)
+	if hasDiagnosticCode(diagnostics, "ambiguous-unit") {
+		t.Fatalf("scoped facts were treated as ambiguous: %#v", diagnostics)
+	}
+	for _, unit := range built.NodesByKind(model.NodeUnit) {
+		manager := StringAttribute(unit.Attributes, "manager")
+		execs := built.Outgoing(unit.NodeRef, model.EdgeExecutes)
+		if len(execs) != 1 {
+			t.Fatalf("unit %s exec edges = %#v", manager, execs)
+		}
+		target, _ := built.Node(execs[0].To)
+		if manager == "system" && target.Label != "/opt/system" || manager == "user" && target.Label != "/opt/user" {
+			t.Fatalf("cross-attached %s unit to %s", manager, target.Label)
+		}
+	}
+}
+
+func TestGraphRejectsTargetedFactsForReusedPID(t *testing.T) {
+	facts := []model.Fact{
+		makeFact(t, "process", "process", "e-process", model.ConfidenceHigh, process.ProcessFact{PID: 42, StartTime: 200, Name: "new", UIDs: [4]int{0, 0, 0, 0}, EvidenceIDs: []string{"e-process"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "process_dependency", "process", "e-deps", model.ConfidenceHigh, process.ProcessDependencyFact{PID: 42, StartTime: 100, OpenFiles: []string{"/tmp/stale"}, EvidenceIDs: []string{"e-deps"}}),
+	}
+	built, diagnostics := Build(facts)
+	processes := built.NodesByKind(model.NodeProcess)
+	if len(processes) != 1 || len(built.Outgoing(processes[0].NodeRef, model.EdgeLoads)) != 0 {
+		t.Fatalf("stale dependency attached: %#v", built.Edges())
+	}
+	if !hasDiagnosticCode(diagnostics, "stale-process-identity") {
+		t.Fatalf("stale identity diagnostic missing: %#v", diagnostics)
+	}
+}
+
+func TestGraphMergesRepeatedSameIdentityProcessEvidence(t *testing.T) {
+	first := process.ProcessFact{PID: 42, StartTime: 200, Name: "demo", UIDs: [4]int{0, 0, 0, 0}, EvidenceIDs: []string{"e-first"}, Confidence: model.ConfidenceHigh}
+	second := first
+	second.Executable = "/opt/demo"
+	second.Cgroups = []process.CgroupFact{{Path: "/system.slice/demo.service"}}
+	second.EvidenceIDs = []string{"e-second"}
+	built, _ := Build([]model.Fact{
+		makeFact(t, "process", "process", "e-first", model.ConfidenceHigh, first),
+		makeFact(t, "process", "process", "e-second", model.ConfidenceHigh, second),
+	})
+	processes := built.NodesByKind(model.NodeProcess)
+	if len(processes) != 1 || !reflect.DeepEqual(processes[0].EvidenceIDs, []string{"e-first", "e-second"}) {
+		t.Fatalf("merged process = %#v", processes)
+	}
+}
+
+func TestGraphRequiresCompatibleCgroupForSystemdMainPID(t *testing.T) {
+	facts := []model.Fact{
+		makeFact(t, "process", "process", "e-process", model.ConfidenceHigh, process.ProcessFact{PID: 42, StartTime: 200, Name: "other", UIDs: [4]int{0, 0, 0, 0}, Cgroups: []process.CgroupFact{{Path: "/user.slice/user-1000.slice/session.scope"}}, EvidenceIDs: []string{"e-process"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "systemd_unit", "systemd", "e-unit", model.ConfidenceHigh, systemd.UnitFact{Name: "demo.service", Manager: "system", MainPID: 42, ControlGroup: "/system.slice/demo.service", UID: 0, EvidenceIDs: []string{"e-unit"}, Confidence: model.ConfidenceHigh}),
+	}
+	built, diagnostics := Build(facts)
+	if len(built.Outgoing(built.NodesByKind(model.NodeProcess)[0].NodeRef, model.EdgeManagedBy)) != 0 {
+		t.Fatalf("incompatible cgroup produced MANAGED_BY: %#v", built.Edges())
+	}
+	if !hasDiagnosticCode(diagnostics, "cgroup-mismatch") {
+		t.Fatalf("cgroup mismatch diagnostic missing: %#v", diagnostics)
 	}
 }
 

@@ -77,6 +77,9 @@ func evaluateSystemdObjectRule(ctx context.Context, g *graphpkg.Graph, metadata 
 		if ctx.Err() != nil {
 			break
 		}
+		if graphpkg.BoolAttribute(unit.Attributes, "inventory_only", false) {
+			continue
+		}
 		consumer := unit.NodeRef
 		for _, runsAs := range g.Outgoing(consumer, model.EdgeRunsAs) {
 			if !privilegeBoundary(g, current, runsAs.To) {

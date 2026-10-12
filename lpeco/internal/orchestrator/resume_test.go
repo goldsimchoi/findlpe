@@ -58,7 +58,7 @@ func TestResumeFromCompletedCheckpointWithoutDuplicates(t *testing.T) {
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
-	if got, want := len(evidence), 3; got != want {
+	if got, want := len(evidence), 4; got != want {
 		t.Fatalf("evidence count = %d, want %d: %#v", got, want, evidence)
 	}
 	if !reflect.DeepEqual(resumed.ObservablePreview, []string{}) {

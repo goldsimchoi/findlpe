@@ -208,7 +208,54 @@ func TestPluginProcessCrashReturnsResumablePartialAndKeepsStderrDiagnostic(t *te
 	}
 }
 
-func TestPluginAdapterContract(t *testing.T) {
+func TestPluginOutputCapabilityHonorsCLIAndJSONEnvelopeLimits(t *testing.T) {
+	capabilities := validCapabilities()
+	capabilities.MaxOutputBytes = 4 * 1024 * 1024
+	transport, _, cleanup := fakeAdapter(t, capabilities, nil)
+	defer cleanup()
+	transport.options.MaxOutputBytes = 8 * 1024
+	got, err := transport.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxOutputBytes != 8*1024 {
+		t.Fatalf("max output = %d, want CLI cap %d", got.MaxOutputBytes, 8*1024)
+	}
+	if got.MaxOutputBytes > protocolOutputLimit(transport.client.options.MaxLineBytes) {
+		t.Fatalf("max output %d exceeds JSONL envelope limit", got.MaxOutputBytes)
+	}
+}
+
+func TestPluginCloseTimeoutTerminatesProcess(t *testing.T) {
+	clientSide, pluginSide := net.Pipe()
+	defer pluginSide.Close()
+	client := NewRPCClient(clientSide, clientSide, nil, nil, ClientOptions{MaxLineBytes: 64 * 1024})
+	terminated := make(chan struct{}, 1)
+	client.setTerminator(func() error {
+		terminated <- struct{}{}
+		return nil
+	})
+	transport := NewClientAdapter(client, Options{})
+	transport.opened = true
+	transport.sessionID = "fixture"
+	go func() {
+		reader := bufio.NewReader(pluginSide)
+		_, _ = reader.ReadBytes('\n')
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := transport.Close(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-terminated:
+	case <-time.After(time.Second):
+		t.Fatal("plugin process terminator was not called")
+	}
+}
+
+func TestBuiltinAdaptersSatisfyContract(t *testing.T) {
 	contracttest.Run(t, func(t *testing.T) (adapter.Adapter, adapter.ExecRequest, []byte) {
 		transport, _, cleanup := fakeAdapter(t, validCapabilities(), func(request Request) Response {
 			switch request.Method {

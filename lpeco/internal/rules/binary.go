@@ -33,9 +33,59 @@ func (rule suidSGIDControlRule) Evaluate(ctx context.Context, g *graphpkg.Graph)
 }
 
 func (rule capabilityBoundaryRule) Evaluate(ctx context.Context, g *graphpkg.Graph) []model.Candidate {
-	return evaluatePrivilegedBinary(ctx, g, rule.Metadata(), func(node model.Node) bool {
+	eligible := func(node model.Node) bool {
 		return graphpkg.BoolAttribute(node.Attributes, "capability_boundary", false) && nonEmptyStringArray(node.Attributes, "capabilities")
-	}, false)
+	}
+	result := evaluatePrivilegedBinary(ctx, g, rule.Metadata(), eligible, false)
+	if g == nil {
+		return result
+	}
+	current, ok := g.CurrentPrincipal()
+	if !ok {
+		return result
+	}
+	covered := make(map[string]bool)
+	for _, candidate := range result {
+		if candidate.PrivilegedConsumer != nil {
+			covered[candidate.PrivilegedConsumer.ID+"\x00"+candidate.TargetPrincipal.ID] = true
+		}
+	}
+	for _, binary := range g.NodesByKind(model.NodeExecutable) {
+		if ctx.Err() != nil {
+			break
+		}
+		if !eligible(binary) || objectNoSUID(g, binary.NodeRef) {
+			continue
+		}
+		for _, runsAs := range g.Outgoing(binary.NodeRef, model.EdgeRunsAs) {
+			key := binary.ID + "\x00" + runsAs.To.ID
+			if covered[key] || !privilegeBoundary(g, current, runsAs.To) {
+				continue
+			}
+			if _, controlled := controlEdge(g, current, binary.NodeRef); controlled && !objectReadOnly(g, binary.NodeRef) {
+				continue
+			}
+			missing := []string{"current-principal control of capability executable is unconfirmed"}
+			rank := Rank(RankInput{PrivilegeBoundary: true, ControlConfirmed: false, SemanticsResolved: true,
+				Confidences: []model.Confidence{binary.Confidence, runsAs.Confidence}, MissingFacts: missing})
+			consumer := binary.NodeRef
+			evidence := evidenceFor(g, binary.NodeRef, runsAs.To, runsAs)
+			id, err := model.StableID("candidate", struct {
+				Rule, Current, Target, Consumer, State string
+			}{rule.ID(), current.ID, runsAs.To.ID, consumer.ID, "inventory"})
+			if err != nil || len(evidence) == 0 {
+				continue
+			}
+			result = append(result, model.Candidate{
+				ID: id, RuleID: rule.ID(), Category: rule.Metadata().Category, Priority: rank.Priority, Confidence: rank.Confidence,
+				CurrentPrincipal: current, TargetPrincipal: runsAs.To, PrivilegedConsumer: &consumer,
+				PathNodes: []model.NodeRef{consumer}, EvidenceIDs: evidence, MissingFacts: missing,
+				ValidationStatus: rank.ValidationStatus,
+				Summary:          fmt.Sprintf("File-capability executable %s crosses a privilege boundary; current-principal control is unconfirmed.", binary.Label),
+			})
+		}
+	}
+	return result
 }
 
 func evaluatePrivilegedBinary(ctx context.Context, g *graphpkg.Graph, metadata Metadata, eligible func(model.Node) bool, requireBitPreservation bool) []model.Candidate {

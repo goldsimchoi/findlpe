@@ -22,18 +22,22 @@ import (
 )
 
 type Options struct {
-	SessionID      string
-	TransportKind  string
-	Target         string
-	Profile        model.HostProfile
-	Collectors     []collect.Collector
-	PrimaryRules   []rules.Rule
-	Rules          []rules.Rule
-	Planner        probe.Planner
-	Full           bool
-	ObservableRead bool
-	MaxParallel    int
-	Now            func() time.Time
+	SessionID           string
+	TransportKind       string
+	Target              string
+	Profile             model.HostProfile
+	Collectors          []collect.Collector
+	PrimaryRules        []rules.Rule
+	Rules               []rules.Rule
+	Planner             probe.Planner
+	Full                bool
+	ObservableRead      bool
+	BeforeObservable    func([]string) error
+	ProcessObservation  time.Duration
+	ObservationInterval time.Duration
+	MaxParallel         int
+	Now                 func() time.Time
+	Wait                func(context.Context, time.Duration) error
 }
 
 type Issue struct {
@@ -92,9 +96,14 @@ type runner struct {
 	checkpoint model.Checkpoint
 	result     Result
 	mu         sync.Mutex
+	persistMu  sync.Mutex
+	evidence   map[string]model.ProbeStatus
 }
 
 func Run(ctx context.Context, transport adapter.Adapter, sessionStore store.SessionStore, options Options) (Result, error) {
+	if options.ProcessObservation < 0 {
+		return Result{}, errors.New("process observation duration cannot be negative")
+	}
 	options = normalizeOptions(options)
 	if options.SessionID == "" {
 		return Result{}, errors.New("session ID is required")
@@ -113,7 +122,13 @@ func run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 		transport: transport, store: sessionStore, options: options, planner: options.Planner,
 		collectors: collectorsByID(options.Collectors), session: session, facts: append([]model.Fact(nil), initialFacts...),
 		factIDs: make(map[string]bool), checkpoint: normalizeCheckpoint(session.Checkpoint),
-		result: Result{SessionID: options.SessionID, Profile: cloneProfile(session.Profile), ObservablePreview: []string{}, Issues: []Issue{}, Phases: []Phase{}},
+		result:   Result{SessionID: options.SessionID, Profile: cloneProfile(session.Profile), ObservablePreview: []string{}, Issues: []Issue{}, Phases: []Phase{}},
+		evidence: make(map[string]model.ProbeStatus),
+	}
+	if existingEvidence, evidenceErr := sessionStore.ListEvidence(context.Background()); evidenceErr == nil {
+		for _, item := range existingEvidence {
+			r.evidence[item.ID] = item.Status
+		}
 	}
 	for _, fact := range r.facts {
 		r.factIDs[fact.ID] = true
@@ -133,7 +148,11 @@ func run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 	if r.session.TransportKind == "" {
 		r.session.TransportKind = capabilities.TransportKind
 	}
-	defer func() { _ = transport.Close(context.Background()) }()
+	defer func() {
+		closeContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = transport.Close(closeContext)
+	}()
 
 	contextOutcome := r.runCollectorPhase(ctx, PhaseContext, selectCollectors(r.collectors, "context"), collect.Discovery{})
 	r.updateProfileFromFacts()
@@ -143,6 +162,11 @@ func run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 	}
 
 	primaryOutcome := r.runCollectorPhase(ctx, PhasePrimary, selectCollectors(r.collectors, "process", "systemd"), collect.Discovery{})
+	if !primaryOutcome.Interrupted {
+		observationOutcome := r.observeProcesses(ctx)
+		primaryOutcome.Interrupted = observationOutcome.Interrupted
+		primaryOutcome.Incomplete = primaryOutcome.Incomplete || observationOutcome.Incomplete
+	}
 	if primaryOutcome.Interrupted || ctx.Err() != nil {
 		r.finish(ctx, false)
 		return r.finalResult()
@@ -203,9 +227,11 @@ func run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 	r.result.Candidates = evaluation.Candidates
 	r.result.RuleDiagnostics = evaluation.Diagnostics
 	r.result.GraphDiagnostics = graphDiagnostics
-	if err := sessionStore.SaveCandidates(ctx, evaluation.Candidates); err != nil {
+	persistContext, cancelPersist := r.persistenceContext()
+	if err := sessionStore.SaveCandidates(persistContext, evaluation.Candidates); err != nil {
 		r.addIssue(PhaseFinalize, "", "save candidates: "+err.Error(), err)
 	}
+	cancelPersist()
 	r.finish(ctx, len(r.result.Issues) == 0)
 	return r.finalResult()
 }
@@ -217,7 +243,11 @@ func (r *runner) runCollectorPhase(ctx context.Context, phase Phase, collectors 
 
 func (r *runner) evaluate(ruleSet []rules.Rule) rules.Evaluation {
 	g, _ := graphpkg.Build(r.snapshotFacts())
-	return rules.Evaluate(context.Background(), g, ruleSet)
+	evaluation := rules.Evaluate(context.Background(), g, ruleSet)
+	for index := range evaluation.Candidates {
+		evaluation.Candidates[index] = r.boundCandidateByEvidence(evaluation.Candidates[index])
+	}
+	return evaluation
 }
 
 func (r *runner) enterPhase(ctx context.Context, phase Phase) {
@@ -225,9 +255,8 @@ func (r *runner) enterPhase(ctx context.Context, phase Phase) {
 	r.result.Phases = append(r.result.Phases, phase)
 	r.checkpoint.Phase = string(phase)
 	r.checkpoint.UpdatedAt = r.options.Now()
-	checkpoint := cloneCheckpoint(r.checkpoint)
 	r.mu.Unlock()
-	if err := r.store.SaveCheckpoint(ctx, checkpoint); err != nil {
+	if err := r.persistCheckpoint(); err != nil {
 		r.addIssue(phase, "", "save checkpoint: "+err.Error(), err)
 	}
 }
@@ -236,9 +265,8 @@ func (r *runner) setPending(ctx context.Context, values []string) {
 	r.mu.Lock()
 	r.checkpoint.PendingValidation = append([]string(nil), values...)
 	r.checkpoint.UpdatedAt = r.options.Now()
-	checkpoint := cloneCheckpoint(r.checkpoint)
 	r.mu.Unlock()
-	if err := r.store.SaveCheckpoint(ctx, checkpoint); err != nil {
+	if err := r.persistCheckpoint(); err != nil {
 		r.addIssue(PhaseTargetedValidation, "", "save pending validation: "+err.Error(), err)
 	}
 }
@@ -270,6 +298,8 @@ func (r *runner) finish(ctx context.Context, complete bool) {
 	r.mu.Lock()
 	r.session.Checkpoint = cloneCheckpoint(r.checkpoint)
 	r.session.Profile = cloneProfile(r.result.Profile)
+	r.session.GraphDiagnostics = append([]model.GraphDiagnostic(nil), r.result.GraphDiagnostics...)
+	r.session.RuleDiagnostics = append([]model.RuleDiagnostic(nil), r.result.RuleDiagnostics...)
 	r.session.UpdatedAt = r.options.Now()
 	if complete {
 		r.session.Status = model.SessionComplete
@@ -278,11 +308,13 @@ func (r *runner) finish(ctx context.Context, complete bool) {
 	}
 	session := r.session
 	r.mu.Unlock()
+	persistContext, cancelPersist := r.persistenceContext()
+	defer cancelPersist()
 	if saver, ok := r.store.(sessionSaver); ok {
-		if err := saver.SaveSession(ctx, session); err != nil {
+		if err := saver.SaveSession(persistContext, session); err != nil {
 			r.addIssue(PhaseFinalize, "", "save session: "+err.Error(), err)
 		}
-	} else if err := r.store.SaveCheckpoint(ctx, session.Checkpoint); err != nil {
+	} else if err := r.store.SaveCheckpoint(persistContext, session.Checkpoint); err != nil {
 		r.addIssue(PhaseFinalize, "", "save checkpoint: "+err.Error(), err)
 	}
 }
@@ -339,6 +371,12 @@ func normalizeOptions(options Options) Options {
 	if options.MaxParallel <= 0 {
 		options.MaxParallel = 4
 	}
+	if options.ObservationInterval <= 0 {
+		options.ObservationInterval = time.Second
+	}
+	if options.Wait == nil {
+		options.Wait = waitForContext
+	}
 	if options.Planner == nil {
 		options.Planner = probe.NewPlanner()
 	}
@@ -352,6 +390,69 @@ func normalizeOptions(options Options) Options {
 		options.Rules = rules.AllRules()
 	}
 	return options
+}
+
+func (r *runner) observeProcesses(ctx context.Context) phaseOutcome {
+	if r.options.ProcessObservation <= 0 {
+		return phaseOutcome{}
+	}
+	collector, ok := r.collectors["process"]
+	if !ok {
+		return phaseOutcome{}
+	}
+	var snapshot probe.Definition
+	for _, definition := range collector.Plan(r.result.Profile, collect.Discovery{}) {
+		if definition.ID == "process.snapshot" {
+			snapshot = definition
+			break
+		}
+	}
+	if snapshot.ID == "" {
+		return phaseOutcome{}
+	}
+
+	outcome := phaseOutcome{}
+	for elapsed, index := time.Duration(0), 1; elapsed < r.options.ProcessObservation; index++ {
+		wait := r.options.ObservationInterval
+		if remaining := r.options.ProcessObservation - elapsed; wait > remaining {
+			wait = remaining
+		}
+		elapsed += wait
+		definition := snapshot
+		definition.ID = fmt.Sprintf("%s.observe.%04d", snapshot.ID, index)
+
+		r.mu.Lock()
+		checkpoint := cloneCheckpoint(r.checkpoint)
+		r.mu.Unlock()
+		decision := r.planner.ShouldRun(definition, checkpoint, probe.Policy{AllowObservable: r.options.ObservableRead})
+		if !decision.Run {
+			continue
+		}
+		if err := r.options.Wait(ctx, wait); err != nil {
+			r.addIssue(PhasePrimary, definition.ID, "wait for process observation: "+err.Error(), err)
+			outcome.Interrupted = true
+			outcome.Incomplete = true
+			return outcome
+		}
+		current := r.runDefinitions(ctx, PhasePrimary, []plannedDefinition{{Definition: definition, Collector: collector}})
+		outcome.Interrupted = outcome.Interrupted || current.Interrupted
+		outcome.Incomplete = outcome.Incomplete || current.Incomplete
+		if current.Interrupted {
+			return outcome
+		}
+	}
+	return outcome
+}
+
+func waitForContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func newCheckpoint(now time.Time) model.Checkpoint {
@@ -417,11 +518,62 @@ func cloneStrings(values map[string]string) map[string]string {
 
 func hasStrongCandidate(values []model.Candidate) bool {
 	for _, value := range values {
-		if value.Priority == model.PriorityP0 || value.Priority == model.PriorityP1 {
+		if (value.Priority == model.PriorityP0 || value.Priority == model.PriorityP1) && value.ValidationStatus != model.ValidationIncomplete {
 			return true
 		}
 	}
 	return false
+}
+
+func (r *runner) persistCheckpoint() error {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	r.mu.Lock()
+	checkpoint := cloneCheckpoint(r.checkpoint)
+	r.mu.Unlock()
+	persistContext, cancelPersist := r.persistenceContext()
+	defer cancelPersist()
+	return r.store.SaveCheckpoint(persistContext, checkpoint)
+}
+
+func (r *runner) persistenceContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
+}
+
+func (r *runner) boundCandidateByEvidence(candidate model.Candidate) model.Candidate {
+	r.mu.Lock()
+	statuses := make(map[string]model.ProbeStatus, len(candidate.EvidenceIDs))
+	for _, evidenceID := range candidate.EvidenceIDs {
+		if status, ok := r.evidence[evidenceID]; ok {
+			statuses[evidenceID] = status
+		}
+	}
+	r.mu.Unlock()
+	severe := false
+	for evidenceID, status := range statuses {
+		if status == "" || status == model.ProbeComplete {
+			continue
+		}
+		candidate.MissingFacts = append(candidate.MissingFacts, fmt.Sprintf("observation %s is %s", evidenceID, status))
+		switch status {
+		case model.ProbeUnavailable, model.ProbeTimeout, model.ProbeParseError:
+			severe = true
+		}
+	}
+	if len(candidate.MissingFacts) == 0 {
+		return candidate
+	}
+	candidate.MissingFacts = uniqueStrings(candidate.MissingFacts)
+	if candidate.Priority == model.PriorityP0 {
+		candidate.Priority = model.PriorityP1
+	}
+	if severe {
+		candidate.Confidence = model.ConfidenceLow
+	} else if candidate.Confidence == model.ConfidenceHigh {
+		candidate.Confidence = model.ConfidenceMedium
+	}
+	candidate.ValidationStatus = model.ValidationIncomplete
+	return candidate
 }
 
 func uniqueStrings(values []string) []string {

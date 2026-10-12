@@ -38,5 +38,6 @@ func Start(ctx context.Context, arguments []string, options Options) (*Adapter, 
 		MaxLineBytes: options.MaxLineBytes,
 		StderrLimit:  options.StderrLimit,
 	})
+	client.setTerminator(command.Process.Kill)
 	return NewClientAdapter(client, options), nil
 }

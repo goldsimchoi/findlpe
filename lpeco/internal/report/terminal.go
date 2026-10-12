@@ -55,6 +55,23 @@ func WriteTerminal(destination io.Writer, data Data) error {
 			return err
 		}
 	}
+	graphDiagnostics := sanitizedGraphDiagnostics(data.GraphDiagnostics)
+	ruleDiagnostics := sanitizedRuleDiagnostics(data.RuleDiagnostics)
+	if len(graphDiagnostics)+len(ruleDiagnostics) > 0 {
+		if _, err := fmt.Fprintln(writer, "\nDiagnostics:"); err != nil {
+			return err
+		}
+		for _, diagnostic := range graphDiagnostics {
+			if _, err := fmt.Fprintf(writer, "- graph/%s: %s (evidence: %s)\n", diagnostic.Code, diagnostic.Message, listOrNone(diagnostic.EvidenceIDs)); err != nil {
+				return err
+			}
+		}
+		for _, diagnostic := range ruleDiagnostics {
+			if _, err := fmt.Fprintf(writer, "- rule/%s/%s: %s (evidence: %s)\n", diagnostic.RuleID, diagnostic.Code, diagnostic.Message, listOrNone(diagnostic.EvidenceIDs)); err != nil {
+				return err
+			}
+		}
+	}
 	limitations := sanitizedStrings(data.Limitations)
 	if len(limitations) > 0 {
 		if _, err := fmt.Fprintln(writer, "\nObservation limitations:"); err != nil {

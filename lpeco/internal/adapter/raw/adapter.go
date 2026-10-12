@@ -132,6 +132,7 @@ func (a *Adapter) Exec(ctx context.Context, request adapter.ExecRequest) (adapte
 		frame frameResult
 		err   error
 	}
+	progress := &frameProgress{}
 	completed := make(chan outcome, 1)
 	go func() {
 		written, writeErr := io.WriteString(a.transport, framed)
@@ -142,7 +143,7 @@ func (a *Adapter) Exec(ctx context.Context, request adapter.ExecRequest) (adapte
 			completed <- outcome{err: fmt.Errorf("write framed command: %w", writeErr)}
 			return
 		}
-		parsed, parseErr := parseFrame(a.transport, nonce, outputLimit)
+		parsed, parseErr := parseFrameWithProgress(a.transport, nonce, outputLimit, progress)
 		completed <- outcome{frame: parsed, err: parseErr}
 	}()
 
@@ -150,6 +151,7 @@ func (a *Adapter) Exec(ctx context.Context, request adapter.ExecRequest) (adapte
 	case <-execContext.Done():
 		a.closed = true
 		_ = a.transport.Close()
+		result.Stdout, result.Truncated = progress.snapshot()
 		result.FinishedAt = time.Now().UTC()
 		if errors.Is(execContext.Err(), context.DeadlineExceeded) {
 			result.Status = model.ProbeTimeout

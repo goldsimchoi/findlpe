@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"encoding/json"
+	"fmt"
 	"sort"
 
 	"github.com/normalone/lpeco/internal/collect"
@@ -57,8 +59,19 @@ func discover(facts []model.Fact) collect.Discovery {
 	g, _ := graphpkg.Build(facts)
 	current, hasCurrent := g.CurrentPrincipal()
 	pidSet := make(map[int]bool)
+	processSet := make(map[string]collect.ProcessIdentity)
 	unitSet := make(map[string]bool)
 	pathSet := make(map[string]bool)
+	var mounts []collect.Mount
+	for _, fact := range facts {
+		if fact.Kind != "mount" {
+			continue
+		}
+		var mount collect.Mount
+		if json.Unmarshal(fact.Data, &mount) == nil && mount.MountPoint != "" {
+			mounts = append(mounts, mount)
+		}
+	}
 	for _, node := range g.NodesByKind(model.NodeProcess) {
 		privileged := !hasCurrent
 		for _, edge := range g.Outgoing(node.NodeRef, model.EdgeRunsAs) {
@@ -70,6 +83,10 @@ func discover(facts []model.Fact) collect.Discovery {
 		if privileged {
 			if pid, ok := graphpkg.IntAttribute(node.Attributes, "pid"); ok && pid > 0 {
 				pidSet[pid] = true
+				if startTime, startOK := graphpkg.IntAttribute(node.Attributes, "start_time"); startOK && startTime > 0 {
+					key := fmt.Sprintf("%d:%d", pid, startTime)
+					processSet[key] = collect.ProcessIdentity{PID: pid, StartTime: uint64(startTime)}
+				}
 			}
 		}
 	}
@@ -93,22 +110,44 @@ func discover(facts []model.Fact) collect.Discovery {
 	for pid := range pidSet {
 		result.HighValuePIDs = append(result.HighValuePIDs, pid)
 	}
+	for _, identity := range processSet {
+		result.HighValueProcesses = append(result.HighValueProcesses, identity)
+	}
 	for unit := range unitSet {
 		result.UnitNames = append(result.UnitNames, unit)
 	}
 	for path := range pathSet {
 		result.ReferencedPaths = append(result.ReferencedPaths, path)
 	}
+	result.Mounts = mounts
 	sort.Ints(result.HighValuePIDs)
+	sort.Slice(result.HighValueProcesses, func(i, j int) bool {
+		if result.HighValueProcesses[i].PID != result.HighValueProcesses[j].PID {
+			return result.HighValueProcesses[i].PID < result.HighValueProcesses[j].PID
+		}
+		return result.HighValueProcesses[i].StartTime < result.HighValueProcesses[j].StartTime
+	})
 	sort.Strings(result.UnitNames)
 	sort.Strings(result.ReferencedPaths)
+	sort.Slice(result.Mounts, func(i, j int) bool {
+		if result.Mounts[i].MountPoint != result.Mounts[j].MountPoint {
+			return result.Mounts[i].MountPoint < result.Mounts[j].MountPoint
+		}
+		return result.Mounts[i].ID < result.Mounts[j].ID
+	})
 	return result
 }
 
 func pendingValidation(discovery collect.Discovery) []string {
-	values := make([]string, 0, len(discovery.HighValuePIDs)+len(discovery.UnitNames)+len(discovery.ReferencedPaths))
-	for _, pid := range discovery.HighValuePIDs {
-		values = append(values, "pid:"+itoa(pid))
+	values := make([]string, 0, len(discovery.HighValuePIDs)+len(discovery.HighValueProcesses)+len(discovery.UnitNames)+len(discovery.ReferencedPaths))
+	if len(discovery.HighValueProcesses) > 0 {
+		for _, identity := range discovery.HighValueProcesses {
+			values = append(values, fmt.Sprintf("pid:%d:start:%d", identity.PID, identity.StartTime))
+		}
+	} else {
+		for _, pid := range discovery.HighValuePIDs {
+			values = append(values, "pid:"+itoa(pid))
+		}
 	}
 	for _, unit := range discovery.UnitNames {
 		values = append(values, "unit:"+unit)

@@ -9,6 +9,9 @@ import (
 )
 
 func Resume(ctx context.Context, transport adapter.Adapter, sessionStore store.SessionStore, options Options) (Result, error) {
+	if options.ProcessObservation < 0 {
+		return Result{}, fmt.Errorf("process observation duration cannot be negative")
+	}
 	options = normalizeOptions(options)
 	if options.SessionID == "" {
 		return Result{}, fmt.Errorf("session ID is required")

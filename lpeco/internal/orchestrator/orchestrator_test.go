@@ -2,10 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"github.com/normalone/lpeco/internal/adapter"
 	"github.com/normalone/lpeco/internal/collect"
 	contextcollect "github.com/normalone/lpeco/internal/collect/context"
+	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	processcollect "github.com/normalone/lpeco/internal/collect/process"
 	graphpkg "github.com/normalone/lpeco/internal/graph"
 	"github.com/normalone/lpeco/internal/model"
@@ -55,6 +59,57 @@ func TestRunOrdersAdaptivePhasesAndExpandsOnlyReferencedPaths(t *testing.T) {
 	wantCalls := []string{"context.current", "process.snapshot", "process.dependencies.42", "path.validate./opt/demo/bin", "scheduler.inventory"}
 	if got := transport.probeCalls(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("probe calls = %#v, want %#v", got, wantCalls)
+	}
+}
+
+func TestDiscoverCarriesMountBoundariesIntoFallbackPlanning(t *testing.T) {
+	mount := pathcollect.MountObservation{ID: 7, MajorMinor: "8:2", Root: "/", MountPoint: "/srv", Bind: true, EvidenceIDs: []string{"e-mount"}}
+	discovery := discover([]model.Fact{testFact("mount", "path", "e-mount", mount)})
+	want := []collect.Mount{{ID: 7, MajorMinor: "8:2", Root: "/", MountPoint: "/srv", Bind: true}}
+	if !reflect.DeepEqual(discovery.Mounts, want) {
+		t.Fatalf("discovered mounts = %#v, want %#v", discovery.Mounts, want)
+	}
+}
+
+func TestRunRepeatsProcessSnapshotForObservationWindow(t *testing.T) {
+	var waits []time.Duration
+	collectors := []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+		testCollector{id: "process", plan: fixedPlan(testDefinition("process.snapshot", "process", model.PassiveRead)), parse: func(definition probe.Definition, _ adapter.ExecResult, evidenceID string) ([]model.Fact, error) {
+			if definition.Parser != "test" {
+				t.Fatalf("observation parser = %q", definition.Parser)
+			}
+			value := processcollect.ProcessFact{PID: len(waits) + 40, StartTime: uint64(len(waits) + 1), Name: "observed", UIDs: [4]int{0, 0, 0, 0}, GIDs: [4]int{0, 0, 0, 0}, EvidenceIDs: []string{evidenceID}, Confidence: model.ConfidenceHigh}
+			return []model.Fact{testFact("process", "process", evidenceID, value)}, nil
+		}},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "raw", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	result, err := Run(context.Background(), transport, newTestStore(t, "observe"), Options{
+		SessionID: "observe", Collectors: collectors, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+		ProcessObservation: 2500 * time.Millisecond, ObservationInterval: time.Second,
+		Wait: func(_ context.Context, duration time.Duration) error {
+			waits = append(waits, duration)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantCalls := []string{"context.current", "process.snapshot", "process.snapshot.observe.0001", "process.snapshot.observe.0002", "process.snapshot.observe.0003"}
+	if got := transport.probeCalls(); !reflect.DeepEqual(got, wantCalls) {
+		t.Fatalf("probe calls = %#v, want %#v", got, wantCalls)
+	}
+	if !reflect.DeepEqual(waits, []time.Duration{time.Second, time.Second, 500 * time.Millisecond}) {
+		t.Fatalf("waits = %#v", waits)
+	}
+	processCount := 0
+	for _, fact := range result.Facts {
+		if fact.Kind == "process" {
+			processCount++
+		}
+	}
+	if processCount != 4 {
+		t.Fatalf("process facts = %d, want 4", processCount)
 	}
 }
 
@@ -124,6 +179,257 @@ func TestExecutionPolicyRetriesAndBoundsAsyncParallelism(t *testing.T) {
 	}
 }
 
+func TestObservableReadIsDisclosedBeforeExecution(t *testing.T) {
+	definitions := []probe.Definition{testDefinition("process.observable", "process", model.ObservableRead)}
+	collectors := []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+		testCollector{id: "process", plan: func(model.HostProfile, collect.Discovery) []probe.Definition { return definitions }},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "raw", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	var disclosed []string
+	result, err := Run(context.Background(), transport, newTestStore(t, "observable-disclosure"), Options{
+		SessionID: "observable-disclosure", Collectors: collectors, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{}, ObservableRead: true,
+		BeforeObservable: func(probeIDs []string) error {
+			if transport.callCount("process.observable") != 0 {
+				t.Fatal("observable probe executed before disclosure")
+			}
+			disclosed = append(disclosed, probeIDs...)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !reflect.DeepEqual(disclosed, []string{"process.observable"}) {
+		t.Fatalf("disclosed = %#v", disclosed)
+	}
+	if transport.callCount("process.observable") != 1 {
+		t.Fatalf("observable calls = %d, want 1", transport.callCount("process.observable"))
+	}
+	if !reflect.DeepEqual(result.ObservablePreview, []string{"process.observable"}) {
+		t.Fatalf("observable preview = %#v", result.ObservablePreview)
+	}
+}
+
+func TestObservableReadFailsClosedWithoutDisclosureCallback(t *testing.T) {
+	collectors := []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+		testCollector{id: "process", plan: fixedPlan(testDefinition("process.observable", "process", model.ObservableRead))},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	result, err := Run(context.Background(), transport, newTestStore(t, "observable-fail-closed"), Options{
+		SessionID: "observable-fail-closed", Collectors: collectors, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{}, ObservableRead: true,
+	})
+	if err == nil || transport.callCount("process.observable") != 0 {
+		t.Fatalf("Run = (%#v, %v), observable calls = %d; want fail-closed", result, err, transport.callCount("process.observable"))
+	}
+}
+
+func TestIncompleteObservationCannotProduceP0AndInterruptsSession(t *testing.T) {
+	collectors := []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+		testCollector{id: "process", plan: fixedPlan(testDefinition("process.snapshot", "process", model.PassiveRead)), parse: processFacts},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	transport.results["process.snapshot"] = []adapter.ExecResult{
+		{Stdout: []byte("prefix"), Status: model.ProbePartial},
+		{Stdout: []byte("prefix"), Status: model.ProbePartial},
+	}
+	sessionStore := newTestStore(t, "incomplete-bound")
+	result, err := Run(context.Background(), transport, sessionStore, Options{
+		SessionID: "incomplete-bound", Collectors: collectors,
+		PrimaryRules: []rules.Rule{p0ProcessRule{}}, Rules: []rules.Rule{p0ProcessRule{}},
+	})
+	if err == nil {
+		t.Fatal("Run succeeded with an unresolved partial observation")
+	}
+	if len(result.Candidates) != 1 {
+		t.Fatalf("candidates = %#v", result.Candidates)
+	}
+	candidate := result.Candidates[0]
+	if candidate.Priority == model.PriorityP0 || candidate.Confidence == model.ConfidenceHigh || candidate.ValidationStatus != model.ValidationIncomplete {
+		t.Fatalf("incomplete evidence produced an overconfident candidate: %#v", candidate)
+	}
+	if !containsTestFragment(candidate.MissingFacts, "observation") {
+		t.Fatalf("candidate missing facts = %#v", candidate.MissingFacts)
+	}
+	for _, fact := range result.Facts {
+		if fact.Kind == "process" && (fact.ObservationStatus != model.ProbePartial || fact.Confidence == model.ConfidenceHigh) {
+			t.Fatalf("partial fact was not bounded: %#v", fact)
+		}
+	}
+	session, loadErr := sessionStore.Load(context.Background(), "incomplete-bound")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if session.Status != model.SessionInterrupted {
+		t.Fatalf("session status = %s, want interrupted", session.Status)
+	}
+}
+
+func TestNonZeroExitIsAnIncompleteObservation(t *testing.T) {
+	definition := testDefinition("context.current", "context", model.PassiveRead)
+	collector := testCollector{id: "context", plan: fixedPlan(definition), parse: contextFacts}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", ReliableExitStatus: true, MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	exitCode := 1
+	transport.results[definition.ID] = []adapter.ExecResult{
+		{Stdout: []byte("prefix"), Status: model.ProbeComplete, ExitCode: &exitCode},
+		{Stdout: []byte("prefix"), Status: model.ProbeComplete, ExitCode: &exitCode},
+	}
+	result, err := Run(context.Background(), transport, newTestStore(t, "nonzero-exit"), Options{
+		SessionID: "nonzero-exit", Collectors: []collect.Collector{collector}, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+	})
+	if err == nil {
+		t.Fatalf("Run = (%#v, nil), want incomplete error", result)
+	}
+	for _, completed := range result.Checkpoint.Completed {
+		if completed.ProbeID == definition.ID && completed.Status == model.ProbeComplete {
+			t.Fatalf("non-zero exit recorded complete: %#v", completed)
+		}
+	}
+}
+
+func TestCollectorRequestedPassiveFallbackExecutesAlternateVariant(t *testing.T) {
+	transport := &variantAdapter{}
+	sessionStore := newTestStore(t, "variant-fallback")
+	result, err := Run(context.Background(), transport, sessionStore, Options{
+		SessionID: "variant-fallback", Collectors: []collect.Collector{fallbackCollector{}}, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !reflect.DeepEqual(transport.variants, []string{"manager", "files"}) {
+		t.Fatalf("variants = %#v", transport.variants)
+	}
+	evidence, loadErr := sessionStore.ListEvidence(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	statuses := make([]model.ProbeStatus, 0, len(evidence))
+	for _, item := range evidence {
+		statuses = append(statuses, item.Status)
+	}
+	sort.Slice(statuses, func(i, j int) bool { return statuses[i] < statuses[j] })
+	if !reflect.DeepEqual(statuses, []model.ProbeStatus{model.ProbeComplete, model.ProbePartial}) {
+		t.Fatalf("fallback evidence statuses = %#v", statuses)
+	}
+	if len(result.Issues) != 0 {
+		t.Fatalf("recovered fallback issues = %#v", result.Issues)
+	}
+}
+
+func TestSSHStyleExecErrorRetriesOnceAndRecovers(t *testing.T) {
+	collectors := []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+		testCollector{id: "process", plan: fixedPlan(testDefinition("process.retry", "process", model.PassiveRead))},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	transport.results["process.retry"] = []adapter.ExecResult{
+		{Stdout: []byte("partial-before-timeout"), Status: model.ProbeTimeout},
+		{Stdout: []byte("complete-after-retry"), Status: model.ProbeComplete},
+	}
+	transport.errors["process.retry"] = []error{adapter.MarkRetryable(context.DeadlineExceeded), nil}
+	sessionStore := newTestStore(t, "exec-error-retry")
+	_, err := Run(context.Background(), transport, sessionStore, Options{SessionID: "exec-error-retry", Collectors: collectors, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{}})
+	if err != nil {
+		t.Fatalf("Run after recovered retry: %v", err)
+	}
+	if transport.callCount("process.retry") != 2 {
+		t.Fatalf("retry calls = %d, want 2", transport.callCount("process.retry"))
+	}
+	evidence, loadErr := sessionStore.ListEvidence(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	statuses := make([]model.ProbeStatus, 0, 2)
+	for _, item := range evidence {
+		if item.ProbeID == "process.retry" {
+			statuses = append(statuses, item.Status)
+		}
+	}
+	sort.Slice(statuses, func(i, j int) bool { return statuses[i] < statuses[j] })
+	if !reflect.DeepEqual(statuses, []model.ProbeStatus{model.ProbeComplete, model.ProbeTimeout}) {
+		t.Fatalf("retry evidence statuses = %#v", statuses)
+	}
+}
+
+func TestRecoveredRetryDiscardsSupersededPartialFacts(t *testing.T) {
+	definition := testDefinition("process.retry-facts", "process", model.PassiveRead)
+	collector := testCollector{
+		id:   "process",
+		plan: fixedPlan(definition),
+		parse: func(_ probe.Definition, result adapter.ExecResult, evidenceID string) ([]model.Fact, error) {
+			value := struct {
+				Value       string   `json:"value"`
+				EvidenceIDs []string `json:"evidence_ids"`
+			}{Value: string(result.Stdout), EvidenceIDs: []string{evidenceID}}
+			return []model.Fact{testFact("retry_fact", "process", evidenceID, value)}, nil
+		},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	transport.results[definition.ID] = []adapter.ExecResult{
+		{Stdout: []byte("partial"), Status: model.ProbePartial},
+		{Stdout: []byte("complete"), Status: model.ProbeComplete},
+	}
+	result, err := Run(context.Background(), transport, newTestStore(t, "retry-facts"), Options{
+		SessionID: "retry-facts", Collectors: []collect.Collector{collector}, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var retryFacts []model.Fact
+	for _, fact := range result.Facts {
+		if fact.Kind == "retry_fact" {
+			retryFacts = append(retryFacts, fact)
+		}
+	}
+	if len(retryFacts) != 1 {
+		t.Fatalf("retry facts = %#v, want only the successful retry", retryFacts)
+	}
+	if retryFacts[0].ObservationStatus != model.ProbeComplete || string(retryFacts[0].Data) == "" || !strings.Contains(string(retryFacts[0].Data), "complete") {
+		t.Fatalf("retained retry fact = %#v", retryFacts[0])
+	}
+}
+
+func TestRecoveredRetryDiscardsSupersededParseError(t *testing.T) {
+	definition := testDefinition("process.retry-parse", "process", model.PassiveRead)
+	collector := testCollector{
+		id:   "process",
+		plan: fixedPlan(definition),
+		parse: func(_ probe.Definition, result adapter.ExecResult, evidenceID string) ([]model.Fact, error) {
+			if string(result.Stdout) == "bad" {
+				return nil, errors.New("transient malformed output")
+			}
+			return []model.Fact{testFact("retry_parse_fact", "process", evidenceID, struct {
+				Value string `json:"value"`
+			}{Value: string(result.Stdout)})}, nil
+		},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	transport.results[definition.ID] = []adapter.ExecResult{
+		{Stdout: []byte("bad"), Status: model.ProbeComplete},
+		{Stdout: []byte("good"), Status: model.ProbeComplete},
+	}
+	result, err := Run(context.Background(), transport, newTestStore(t, "retry-parse"), Options{
+		SessionID: "retry-parse", Collectors: []collect.Collector{collector}, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+	})
+	if err != nil || len(result.Issues) != 0 {
+		t.Fatalf("recovered parse retry = (%#v, %v)", result.Issues, err)
+	}
+	if transport.callCount(definition.ID) != 2 {
+		t.Fatalf("parse retry calls = %d, want 2", transport.callCount(definition.ID))
+	}
+	var facts []model.Fact
+	for _, fact := range result.Facts {
+		if fact.Kind == "retry_parse_fact" {
+			facts = append(facts, fact)
+		}
+	}
+	if len(facts) != 1 || !strings.Contains(string(facts[0].Data), "good") {
+		t.Fatalf("parse retry facts = %#v", facts)
+	}
+}
+
 func TestRawTransportExecutesSequentially(t *testing.T) {
 	collectors := []collect.Collector{
 		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
@@ -151,6 +457,84 @@ func TestParserErrorPersistsEvidenceAsParseError(t *testing.T) {
 	evidence, loadErr := store.ListEvidence(context.Background())
 	if loadErr != nil || len(evidence) == 0 || evidence[0].Status != model.ProbeParseError {
 		t.Fatalf("evidence = %#v, err = %v", evidence, loadErr)
+	}
+}
+
+func TestExecErrorPreservesPartialEvidenceStatusAndBody(t *testing.T) {
+	collectors := []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+		testCollector{id: "process", plan: fixedPlan(testDefinition("process.partial", "process", model.PassiveRead))},
+	}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "raw", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	partialBody := []byte("LPECO_PROC_V1\nPROCESS\t42\n")
+	transport.results["process.partial"] = []adapter.ExecResult{{Stdout: partialBody, Status: model.ProbeTimeout}}
+	transport.errors["process.partial"] = []error{context.DeadlineExceeded}
+	sessionStore := newTestStore(t, "partial-evidence")
+	result, err := Run(context.Background(), transport, sessionStore, Options{SessionID: "partial-evidence", Collectors: collectors, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{}})
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want deadline exceeded", err)
+	}
+	evidence, loadErr := sessionStore.ListEvidence(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	var partial model.Evidence
+	for _, item := range evidence {
+		if item.ProbeID == "process.partial" {
+			partial = item
+			break
+		}
+	}
+	if partial.ID == "" {
+		t.Fatalf("partial evidence missing: %#v", evidence)
+	}
+	digest := sha256.Sum256(partialBody)
+	if partial.Status != model.ProbeTimeout || partial.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("partial evidence = %#v", partial)
+	}
+	completed := result.Checkpoint.Completed["process.partial|"+partial.InputFingerprint]
+	if completed.EvidenceID != partial.ID || completed.Status != model.ProbeTimeout {
+		t.Fatalf("partial checkpoint = %#v", completed)
+	}
+}
+
+func TestCancellationPersistsPartialEvidenceCheckpointAndSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	transport := &cancellingAdapter{cancel: cancel}
+	collectors := []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+		testCollector{id: "process", plan: fixedPlan(testDefinition("process.cancelled", "process", model.PassiveRead)), parse: processFacts},
+	}
+	sessionStore := newTestStore(t, "cancel-persistence")
+	result, err := Run(ctx, transport, sessionStore, Options{
+		SessionID: "cancel-persistence", Collectors: collectors, PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+	})
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want cancellation", err)
+	}
+	evidence, loadErr := sessionStore.ListEvidence(context.Background())
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	var partial model.Evidence
+	for _, item := range evidence {
+		if item.ProbeID == "process.cancelled" {
+			partial = item
+		}
+	}
+	if partial.ID == "" || partial.Status != model.ProbePartial {
+		t.Fatalf("cancelled evidence = %#v", evidence)
+	}
+	completed := result.Checkpoint.Completed["process.cancelled|"+partial.InputFingerprint]
+	if completed.EvidenceID != partial.ID || completed.Status != model.ProbePartial {
+		t.Fatalf("cancelled checkpoint = %#v", completed)
+	}
+	session, loadErr := sessionStore.Load(context.Background(), "cancel-persistence")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if session.Status != model.SessionInterrupted || session.Checkpoint.Completed["process.cancelled|"+partial.InputFingerprint].EvidenceID != partial.ID {
+		t.Fatalf("cancelled session = %#v", session)
 	}
 }
 
@@ -208,6 +592,8 @@ func testFact(kind, collector, evidence string, value any) model.Fact {
 
 type strongProcessRule struct{}
 
+type p0ProcessRule struct{}
+
 func (strongProcessRule) ID() string { return "test.strong-process" }
 func (strongProcessRule) Metadata() rules.Metadata {
 	return rules.Metadata{ID: "test.strong-process", Category: "test", Description: "test"}
@@ -235,6 +621,28 @@ func (strongProcessRule) Evaluate(_ context.Context, g *graphpkg.Graph) []model.
 		EvidenceIDs: append([]string(nil), process.EvidenceIDs...), MissingFacts: []string{}, ValidationStatus: model.ValidationReadOnly, Summary: "strong test candidate"}}
 }
 
+func (p0ProcessRule) ID() string { return "test.p0-process" }
+func (p0ProcessRule) Metadata() rules.Metadata {
+	return rules.Metadata{ID: "test.p0-process", Category: "test", Description: "test"}
+}
+func (p0ProcessRule) Evaluate(_ context.Context, g *graphpkg.Graph) []model.Candidate {
+	values := strongProcessRule{}.Evaluate(context.Background(), g)
+	for index := range values {
+		values[index].RuleID = "test.p0-process"
+		values[index].Priority = model.PriorityP0
+	}
+	return values
+}
+
+func containsTestFragment(values []string, fragment string) bool {
+	for _, value := range values {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
 type fakeAdapter struct {
 	mu        sync.Mutex
 	caps      adapter.Capabilities
@@ -244,6 +652,61 @@ type fakeAdapter struct {
 	delay     time.Duration
 	active    int
 	maxActive int
+}
+
+type cancellingAdapter struct {
+	cancel context.CancelFunc
+}
+
+type variantAdapter struct {
+	variants []string
+}
+
+func (a *variantAdapter) Open(context.Context) (adapter.Capabilities, error) {
+	return adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20}, nil
+}
+func (a *variantAdapter) Close(context.Context) error { return nil }
+func (a *variantAdapter) Exec(_ context.Context, request adapter.ExecRequest) (adapter.ExecResult, error) {
+	a.variants = append(a.variants, request.VariantID)
+	if request.VariantID == "manager" {
+		return adapter.ExecResult{Stdout: []byte("manager unavailable\n"), Status: model.ProbeComplete}, nil
+	}
+	return adapter.ExecResult{Stdout: []byte("files complete\n"), Status: model.ProbeComplete}, nil
+}
+
+type fallbackCollector struct{}
+
+func (fallbackCollector) ID() string { return "context" }
+func (fallbackCollector) Plan(model.HostProfile, collect.Discovery) []probe.Definition {
+	return []probe.Definition{{
+		ID: "context.fallback", Collector: "context", Parser: "test", RedactionPolicy: "default", SafetyClass: model.PassiveRead,
+		Variants: []probe.Variant{
+			{ID: "manager", Command: adapter.Command{Script: "printf manager"}},
+			{ID: "files", Command: adapter.Command{Script: "printf files"}},
+		},
+		Timeout: time.Second, MaxOutput: 4096, Produces: []string{"test"}, Idempotent: true,
+	}}
+}
+func (fallbackCollector) Parse(_ probe.Definition, _ adapter.ExecResult, evidenceID string) ([]model.Fact, error) {
+	return contextFacts(probe.Definition{}, adapter.ExecResult{}, evidenceID)
+}
+func (fallbackCollector) Assess(_ probe.Definition, variant probe.Variant, result adapter.ExecResult) collect.ObservationAssessment {
+	if variant.ID == "manager" {
+		return collect.ObservationAssessment{Status: model.ProbePartial, Fallback: true}
+	}
+	return collect.ObservationAssessment{Status: result.Status}
+}
+
+func (a *cancellingAdapter) Open(context.Context) (adapter.Capabilities, error) {
+	return adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20}, nil
+}
+func (a *cancellingAdapter) Close(context.Context) error { return nil }
+func (a *cancellingAdapter) Exec(_ context.Context, request adapter.ExecRequest) (adapter.ExecResult, error) {
+	if request.ProbeID == "process.cancelled" {
+		a.cancel()
+		return adapter.ExecResult{Stdout: []byte("partial-before-signal"), Status: model.ProbePartial}, context.Canceled
+	}
+	return adapter.ExecResult{Stdout: []byte("ok\n"), Status: model.ProbeComplete}, nil
 }
 
 func newFakeAdapter(caps adapter.Capabilities) *fakeAdapter {

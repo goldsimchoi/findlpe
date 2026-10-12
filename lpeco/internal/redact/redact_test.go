@@ -1,7 +1,9 @@
 package redact
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +34,29 @@ func TestArgumentsAndEnvironmentApplyContextAwareMasking(t *testing.T) {
 	wantEnvironment := map[string]string{"PATH": "/usr/local/bin:/usr/bin", "LD_LIBRARY_PATH": "/opt/demo/lib", "API_TOKEN": Redacted, "CUSTOM": Redacted}
 	if got := Environment(environment); !reflect.DeepEqual(got, wantEnvironment) {
 		t.Fatalf("Environment = %#v, want %#v", got, wantEnvironment)
+	}
+}
+
+func TestJSONMasksValuesMarkedSensitive(t *testing.T) {
+	input := json.RawMessage(`{"pid":42,"values":{"PATH":{"value":"/private/toolchain/bin","sensitive":true},"DISPLAY":{"value":":0","sensitive":false}}}`)
+	output := JSON(input)
+	if strings.Contains(string(output), "/private/toolchain/bin") {
+		t.Fatalf("JSON leaked sensitive environment value: %s", output)
+	}
+	var decoded struct {
+		Values map[string]struct {
+			Value     string `json:"value"`
+			Sensitive bool   `json:"sensitive"`
+		} `json:"values"`
+	}
+	if err := json.Unmarshal(output, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Values["PATH"].Value != Redacted || !decoded.Values["PATH"].Sensitive {
+		t.Fatalf("sensitive value = %#v", decoded.Values["PATH"])
+	}
+	if decoded.Values["DISPLAY"].Value != ":0" || decoded.Values["DISPLAY"].Sensitive {
+		t.Fatalf("non-sensitive value = %#v", decoded.Values["DISPLAY"])
 	}
 }
 

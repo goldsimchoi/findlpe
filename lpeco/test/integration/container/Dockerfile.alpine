@@ -1,0 +1,14 @@
+FROM alpine:3.22
+
+RUN apk add --no-cache acl binutils coreutils findutils libcap shadow
+
+COPY lpeco /usr/local/bin/lpeco
+COPY fixture.sh /usr/local/libexec/lpeco-fixture
+
+ENV LPECO_FIXTURE_KIND=alpine LPECO_DISPOSABLE_FIXTURE=confirmed
+RUN chmod 0755 /usr/local/bin/lpeco /usr/local/libexec/lpeco-fixture \
+    && useradd --create-home --uid 1000 --shell /bin/sh lpeco \
+    && /usr/local/libexec/lpeco-fixture setup
+
+ENTRYPOINT ["/usr/local/libexec/lpeco-fixture"]
+CMD ["verify"]

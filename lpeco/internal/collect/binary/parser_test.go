@@ -2,10 +2,13 @@ package binary
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/normalone/lpeco/internal/collect"
 	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	"github.com/normalone/lpeco/internal/model"
 )
@@ -33,6 +36,11 @@ func TestParseReadableSudoersAndNonInteractiveList(t *testing.T) {
 	}
 	if SudoersDefinition().SafetyClass != model.PassiveRead {
 		t.Fatal("readable sudoers probe is not passive")
+	}
+
+	ambiguous := ParseSudoList([]byte("(root) NOPASSWD: !/bin/sh, ALL\n"), "e-ambiguous")
+	if len(ambiguous) != 2 || !ambiguous[0].Negated || ambiguous[0].SemanticsResolved || ambiguous[1].SemanticsResolved {
+		t.Fatalf("ambiguous sudo semantics = %#v", ambiguous)
 	}
 }
 
@@ -66,6 +74,50 @@ func TestParsePrivilegedFilesCapabilitiesAndELFDependencies(t *testing.T) {
 		if !found {
 			t.Fatalf("dependency kind %q missing: %#v", kind, dependencies)
 		}
+	}
+}
+
+func TestPrivilegedWalkPrunesExcludedTreeBeforeCapabilityReads(t *testing.T) {
+	root := t.TempDir()
+	excluded := filepath.Join(root, "excluded")
+	allowed := filepath.Join(root, "allowed")
+	if err := os.MkdirAll(excluded, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(allowed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(excluded, "secret"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(allowed, "visible"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "fake-bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	getcap := filepath.Join(bin, "getcap")
+	if err := os.WriteFile(getcap, []byte("#!/bin/sh\nfor value do last=$value; done\nprintf '%s\\n' \"$last\" >>\"$LPECO_GETCAP_LOG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "getcap.log")
+	definition := PrivilegedDefinitionWithExcludes(root, []string{excluded}, 100)
+	command := definition.Variants[0].Command
+	process := exec.Command("sh", append([]string{"-c", command.Script, "lpeco"}, command.Args...)...)
+	process.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "LPECO_GETCAP_LOG="+logPath)
+	if output, err := process.CombinedOutput(); err != nil {
+		t.Fatalf("walk: %v\n%s", err, output)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), filepath.Join(excluded, "secret")) {
+		t.Fatalf("excluded tree was read by getcap: %s", log)
+	}
+	if !strings.Contains(string(log), filepath.Join(allowed, "visible")) {
+		t.Fatalf("allowed tree was not inspected: %s", log)
 	}
 }
 
@@ -104,6 +156,50 @@ func TestPackageOwnershipParsersAndUnknownManager(t *testing.T) {
 	}
 }
 
+func TestTargetedBinaryProbesTreatExpectedNegativeResultsAsComplete(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "script")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"readelf":    "#!/bin/sh\nexit 1\n",
+		"dpkg-query": "#!/bin/sh\nexit 1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	elfCommand := ELFDefinition(target).Variants[0].Command
+	elfProcess := exec.Command("sh", append([]string{"-c", elfCommand.Script, "lpeco"}, elfCommand.Args...)...)
+	elfProcess.Env = append(os.Environ(), "PATH="+fakeBin+":/usr/bin:/bin")
+	elfOutput, err := elfProcess.CombinedOutput()
+	if err != nil {
+		t.Fatalf("non-ELF script probe should be complete: %v\n%s", err, elfOutput)
+	}
+	dependencies, diagnostics := ParseELF(target, elfOutput, "e-script")
+	if len(diagnostics) != 0 || len(dependencies) != 1 || dependencies[0].Kind != "script" {
+		t.Fatalf("script dependencies = %#v, diagnostics = %#v", dependencies, diagnostics)
+	}
+
+	packageCommand := PackageDefinition(target).Variants[0].Command
+	packageProcess := exec.Command("sh", append([]string{"-c", packageCommand.Script, "lpeco"}, packageCommand.Args...)...)
+	packageProcess.Env = append(os.Environ(), "PATH="+fakeBin+":/usr/bin:/bin")
+	packageOutput, err := packageProcess.CombinedOutput()
+	if err != nil {
+		t.Fatalf("unowned package probe should be complete: %v\n%s", err, packageOutput)
+	}
+	ownership := ParsePackageProbe(target, packageOutput, "e-unowned")
+	if ownership.Owned || ownership.Manager != "dpkg" {
+		t.Fatalf("unowned package fact = %#v", ownership)
+	}
+}
+
 func TestWalkPlanSkipsPseudoRemoteDuplicateBindAndExcludes(t *testing.T) {
 	mounts := []pathcollect.MountObservation{
 		{ID: 1, MajorMinor: "8:1", Root: "/", MountPoint: "/"},
@@ -116,6 +212,48 @@ func TestWalkPlanSkipsPseudoRemoteDuplicateBindAndExcludes(t *testing.T) {
 	got := PlanWalk(mounts, WalkOptions{Excludes: []string{"/secret"}, Limit: 10})
 	if !reflect.DeepEqual(got, []WalkTarget{{Root: "/", MajorMinor: "8:1", Limit: 10}, {Root: "/srv", MajorMinor: "8:2", Limit: 10}}) {
 		t.Fatalf("walk plan = %#v", got)
+	}
+}
+
+func TestWalkPlanRestrictsContainingMountToRequestedRoot(t *testing.T) {
+	mounts := []pathcollect.MountObservation{
+		{ID: 1, MajorMinor: "8:1", Root: "/", MountPoint: "/"},
+		{ID: 2, MajorMinor: "8:2", Root: "/", MountPoint: "/opt/data"},
+		{ID: 3, MajorMinor: "8:3", Root: "/", MountPoint: "/home"},
+	}
+	got := PlanWalk(mounts, WalkOptions{Roots: []string{"/opt"}, Limit: 10})
+	want := []WalkTarget{{Root: "/opt", MajorMinor: "8:1", Limit: 10}, {Root: "/opt/data", MajorMinor: "8:2", Limit: 10}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("restricted walk plan = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectorPlansWalkFromDiscoveredMounts(t *testing.T) {
+	discovery := collect.Discovery{Mounts: []collect.Mount{
+		{MajorMinor: "8:1", Root: "/", MountPoint: "/"},
+		{MajorMinor: "0:1", Root: "/", MountPoint: "/proc", Pseudo: true},
+		{MajorMinor: "8:2", Root: "/", MountPoint: "/srv"},
+		{MajorMinor: "8:2", Root: "/", MountPoint: "/mnt/srv", Bind: true},
+	}}
+	definitions := (Collector{WalkOptions: WalkOptions{Limit: 17}}).Plan(model.HostProfile{}, discovery)
+	var roots []string
+	for _, definition := range definitions {
+		if definition.Parser == "privileged-v1" {
+			roots = append(roots, definition.Variants[0].Command.Args[0])
+		}
+	}
+	if !reflect.DeepEqual(roots, []string{"/", "/srv"}) {
+		t.Fatalf("collector walk roots = %#v", roots)
+	}
+}
+
+func TestPrivilegedWalkKeepsCapabilitySearchOnFilesystemBoundary(t *testing.T) {
+	script := PrivilegedDefinition("/", 10).Variants[0].Command.Script
+	if strings.Contains(script, "getcap -r") {
+		t.Fatalf("recursive getcap escapes find -xdev boundary: %s", script)
+	}
+	if strings.Count(script, `find "$_lpeco_root" -xdev`) < 2 {
+		t.Fatalf("set-ID and capability searches must both enforce -xdev: %s", script)
 	}
 }
 

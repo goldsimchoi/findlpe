@@ -34,6 +34,42 @@
         {"kind":"RUNS_AS","from":"command","to":"root"},
         {"kind":"CAN_EXECUTE","from":"attacker","to":"command","attributes":{"delegation":true,"policy_confirmed":false}}
       ]
+    },
+    {
+      "name":"sudo-password-required-inventory","rule_id":"delegation.sudo-policy","current":"attacker","want_count":1,"want_priority":"P2","want_missing":["NOPASSWD"],
+      "nodes":[
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"command","kind":"Executable","label":"/usr/bin/id","attributes":{"delegated_command":true}}
+      ],
+      "edges":[
+        {"kind":"RUNS_AS","from":"command","to":"root"},
+        {"kind":"CAN_EXECUTE","from":"attacker","to":"command","attributes":{"delegation":true,"policy_confirmed":true,"no_password":false,"semantics_resolved":true}}
+      ]
+    },
+    {
+      "name":"sudo-negated-command","rule_id":"delegation.sudo-policy","current":"attacker","want_count":0,
+      "nodes":[
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"command","kind":"Executable","label":"!/bin/sh","attributes":{"delegated_command":true}}
+      ],
+      "edges":[
+        {"kind":"RUNS_AS","from":"command","to":"root"},
+        {"kind":"CAN_EXECUTE","from":"attacker","to":"command","attributes":{"delegation":true,"policy_confirmed":true,"no_password":true,"negated":true,"semantics_resolved":false}}
+      ]
+    },
+    {
+      "name":"sudo-all-unresolved","rule_id":"delegation.sudo-policy","current":"attacker","want_count":0,
+      "nodes":[
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"command","kind":"Executable","label":"ALL","attributes":{"delegated_command":true}}
+      ],
+      "edges":[
+        {"kind":"RUNS_AS","from":"command","to":"root"},
+        {"kind":"CAN_EXECUTE","from":"attacker","to":"command","attributes":{"delegation":true,"policy_confirmed":true,"no_password":true,"semantics_resolved":false}}
+      ]
     }
   ]
 }

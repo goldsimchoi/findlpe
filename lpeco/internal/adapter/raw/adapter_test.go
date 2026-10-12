@@ -82,6 +82,9 @@ func TestRawAdapterNeverCompletesWithoutValidEnd(t *testing.T) {
 			if result.Status != tt.wantStatus || !errors.Is(err, tt.wantErr) {
 				t.Fatalf("result/status = (%#v, %v), want %s/%v", result, err, tt.wantStatus, tt.wantErr)
 			}
+			if tt.name == "disconnect" && string(result.Stdout) != "partial" {
+				t.Fatalf("missing-end result discarded partial stdout: %#v", result)
+			}
 		})
 	}
 }
@@ -104,10 +107,14 @@ func TestRawAdapterMarksTruncation(t *testing.T) {
 func TestRawAdapterTimesOutAndClosesBlockedTransport(t *testing.T) {
 	client, server := net.Pipe()
 	defer server.Close()
-	transport := New(client, Options{Nonce: fixedNonce("dddddddddddddddddddddddddddddddd")})
+	nonce := "dddddddddddddddddddddddddddddddd"
+	transport := New(client, Options{Nonce: fixedNonce(nonce)})
 	_, _ = transport.Open(context.Background())
 	go func() {
 		_, _ = io.Copy(io.Discard, server)
+	}()
+	go func() {
+		_, _ = server.Write(append(append(startMarker(nonce), '\n'), []byte("partial-before-timeout")...))
 	}()
 	result, err := transport.Exec(context.Background(), adapter.ExecRequest{
 		ProbeID: "timeout", Command: adapter.Command{Script: "printf never"}, Timeout: 20 * time.Millisecond,
@@ -115,26 +122,30 @@ func TestRawAdapterTimesOutAndClosesBlockedTransport(t *testing.T) {
 	if result.Status != model.ProbeTimeout || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout result = (%#v, %v)", result, err)
 	}
+	if string(result.Stdout) != "partial-before-timeout" {
+		t.Fatalf("timeout discarded partial stdout: %#v", result)
+	}
 }
 
-func TestRawAdapterContract(t *testing.T) {
-	nonce := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	contracttest.Run(t, func(t *testing.T) (adapter.Adapter, adapter.ExecRequest, []byte) {
-		return New(&memoryRWC{reader: bytes.NewReader(framedTranscript(nonce, []byte("raw-ok\n"), "0"))}, Options{Nonce: fixedNonce(nonce)}), adapter.ExecRequest{
-			ProbeID: "contract", Command: adapter.Command{Script: "printf 'raw-ok\\n'"}, Timeout: time.Second,
-		}, []byte("raw-ok\n")
+func TestBuiltinAdaptersSatisfyContract(t *testing.T) {
+	t.Run("raw-listener", func(t *testing.T) {
+		nonce := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+		contracttest.Run(t, func(t *testing.T) (adapter.Adapter, adapter.ExecRequest, []byte) {
+			return New(&memoryRWC{reader: bytes.NewReader(framedTranscript(nonce, []byte("raw-ok\n"), "0"))}, Options{Nonce: fixedNonce(nonce)}), adapter.ExecRequest{
+				ProbeID: "contract", Command: adapter.Command{Script: "printf 'raw-ok\\n'"}, Timeout: time.Second,
+			}, []byte("raw-ok\n")
+		})
 	})
-}
-
-func TestStdioBridgeContract(t *testing.T) {
-	contracttest.Run(t, func(t *testing.T) (adapter.Adapter, adapter.ExecRequest, []byte) {
-		bridge, err := StartBridge(context.Background(), []string{"sh"})
-		if err != nil {
-			t.Fatalf("StartBridge: %v", err)
-		}
-		return New(bridge, Options{TransportKind: "stdio-bridge"}), adapter.ExecRequest{
-			ProbeID: "contract", Command: adapter.Command{Script: "printf 'bridge-ok\\n'"}, Timeout: time.Second,
-		}, []byte("bridge-ok\n")
+	t.Run("stdio-raw-bridge", func(t *testing.T) {
+		contracttest.Run(t, func(t *testing.T) (adapter.Adapter, adapter.ExecRequest, []byte) {
+			bridge, err := StartBridge(context.Background(), []string{"sh"})
+			if err != nil {
+				t.Fatalf("StartBridge: %v", err)
+			}
+			return New(bridge, Options{TransportKind: "stdio-bridge"}), adapter.ExecRequest{
+				ProbeID: "contract", Command: adapter.Command{Script: "printf 'bridge-ok\\n'"}, Timeout: time.Second,
+			}, []byte("bridge-ok\n")
+		})
 	})
 }
 

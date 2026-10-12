@@ -13,16 +13,18 @@ import (
 )
 
 type DelegationFact struct {
-	Subject      string           `json:"subject"`
-	Host         string           `json:"host,omitempty"`
-	RunAs        string           `json:"run_as"`
-	Command      string           `json:"command"`
-	NoPassword   bool             `json:"no_password"`
-	SourceKind   string           `json:"source_kind"`
-	SourcePath   string           `json:"source_path,omitempty"`
-	EvidenceIDs  []string         `json:"evidence_ids"`
-	MissingFacts []string         `json:"missing_facts,omitempty"`
-	Confidence   model.Confidence `json:"confidence"`
+	Subject           string           `json:"subject"`
+	Host              string           `json:"host,omitempty"`
+	RunAs             string           `json:"run_as"`
+	Command           string           `json:"command"`
+	NoPassword        bool             `json:"no_password"`
+	Negated           bool             `json:"negated"`
+	SemanticsResolved bool             `json:"semantics_resolved"`
+	SourceKind        string           `json:"source_kind"`
+	SourcePath        string           `json:"source_path,omitempty"`
+	EvidenceIDs       []string         `json:"evidence_ids"`
+	MissingFacts      []string         `json:"missing_facts,omitempty"`
+	Confidence        model.Confidence `json:"confidence"`
 }
 
 const sudoersScript = `printf 'LPECO_SUDOERS_V1\n'
@@ -84,8 +86,10 @@ func ParseSudoers(sourcePath string, input []byte, evidenceID string) []Delegati
 			right = strings.TrimSpace(after)
 		}
 		for _, command := range splitSudoCommands(right) {
+			negated, resolved := delegationSemantics(runAs, command)
 			facts = append(facts, DelegationFact{
 				Subject: subject, Host: host, RunAs: runAs, Command: command, NoPassword: noPassword,
+				Negated: negated, SemanticsResolved: resolved,
 				SourceKind: "sudoers-file", SourcePath: sourcePath, EvidenceIDs: []string{evidenceID}, Confidence: model.ConfidenceHigh,
 			})
 		}
@@ -113,13 +117,30 @@ func ParseSudoList(input []byte, evidenceID string) []DelegationFact {
 			rest = strings.TrimSpace(after)
 		}
 		for _, command := range splitSudoCommands(rest) {
+			negated, resolved := delegationSemantics(runAs, command)
 			facts = append(facts, DelegationFact{
 				RunAs: runAs, Command: command, NoPassword: noPassword, SourceKind: "sudo-list",
+				Negated: negated, SemanticsResolved: resolved,
 				EvidenceIDs: []string{evidenceID}, Confidence: model.ConfidenceHigh,
 			})
 		}
 	}
 	return facts
+}
+
+func delegationSemantics(runAs, command string) (bool, bool) {
+	command = strings.TrimSpace(command)
+	negated := strings.HasPrefix(command, "!")
+	plain := strings.TrimSpace(strings.TrimPrefix(command, "!"))
+	fields := strings.Fields(plain)
+	if negated || len(fields) == 0 || strings.EqualFold(strings.TrimSpace(runAs), "ALL") {
+		return negated, false
+	}
+	executable := fields[0]
+	if strings.Contains(executable, ":") && len(fields) > 1 {
+		return negated, false
+	}
+	return negated, strings.HasPrefix(executable, "/") && executable != "/" && !strings.ContainsAny(executable, "*?[]")
 }
 
 func ParseSudoersProbe(input []byte, evidenceID string) []DelegationFact {

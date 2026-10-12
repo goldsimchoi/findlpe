@@ -30,8 +30,13 @@ done`
 
 const environmentScript = `printf 'LPECO_ENV_V1\n'
 case "$1" in ''|*[!0-9]*) printf 'ERROR\tpid\tinvalid pid\n'; exit 64;; esac
+case "$2" in ''|*[!0-9]*) printf 'ERROR\tstarttime\tinvalid expected start time\n'; exit 64;; esac
 _lpeco_file="/proc/$1/environ"
-if [ ! -r "$_lpeco_file" ]; then printf 'ERROR\tenvironment\tpermission denied or process vanished\n'; exit 0; fi
+_lpeco_read_start() { _lpeco_stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1; _lpeco_rest=${_lpeco_stat##*) }; printf '%s\n' "$_lpeco_rest" | awk '{print $20}'; }
+_lpeco_before=$(_lpeco_read_start "$1") || { printf 'ERROR\tidentity\tprocess vanished before collection\n'; exit 75; }
+printf 'STARTTIME\t%s\n' "$_lpeco_before"
+[ "$2" = 0 ] || [ "$_lpeco_before" = "$2" ] || { printf 'ERROR\tidentity\tPID was reused before collection\n'; exit 75; }
+if [ ! -r "$_lpeco_file" ]; then printf 'ERROR\tenvironment\tpermission denied or process vanished\n'; exit 75; fi
 tr '\000' '\n' < "$_lpeco_file" | while IFS= read -r _lpeco_entry; do
   case "$_lpeco_entry" in
     PATH=*|LD_LIBRARY_PATH=*|LD_PRELOAD=*|PYTHONPATH=*|PERL5LIB=*|RUBYLIB=*|GEM_PATH=*|NODE_PATH=*|CLASSPATH=*)
@@ -41,11 +46,19 @@ tr '\000' '\n' < "$_lpeco_file" | while IFS= read -r _lpeco_entry; do
       printf 'ENV\t%s\t%s\n' "$_lpeco_key_hex" "$_lpeco_value_hex"
       ;;
   esac
-done`
+done
+_lpeco_after=$(_lpeco_read_start "$1") || { printf 'ERROR\tidentity\tprocess vanished after collection\n'; exit 75; }
+printf 'END_STARTTIME\t%s\n' "$_lpeco_after"
+[ "$_lpeco_before" = "$_lpeco_after" ] || { printf 'ERROR\tidentity\tPID was reused during collection\n'; exit 75; }`
 
 const dependencyScript = `printf 'LPECO_DEP_V1\n'
 case "$1" in ''|*[!0-9]*) printf 'ERROR\tpid\tinvalid pid\n'; exit 64;; esac
+case "$2" in ''|*[!0-9]*) printf 'ERROR\tstarttime\tinvalid expected start time\n'; exit 64;; esac
 _lpeco_dir="/proc/$1"
+_lpeco_read_start() { _lpeco_stat=$(cat "$1/stat" 2>/dev/null) || return 1; _lpeco_rest=${_lpeco_stat##*) }; printf '%s\n' "$_lpeco_rest" | awk '{print $20}'; }
+_lpeco_before=$(_lpeco_read_start "$_lpeco_dir") || { printf 'ERROR\tidentity\tprocess vanished before collection\n'; exit 75; }
+printf 'STARTTIME\t%s\n' "$_lpeco_before"
+[ "$2" = 0 ] || [ "$_lpeco_before" = "$2" ] || { printf 'ERROR\tidentity\tPID was reused before collection\n'; exit 75; }
 for _lpeco_fd in "$_lpeco_dir"/fd/*; do
   [ -e "$_lpeco_fd" ] || continue
   _lpeco_path=$(readlink "$_lpeco_fd" 2>/dev/null) || { printf 'ERROR\tfd\tpermission denied or process vanished\n'; break; }
@@ -59,7 +72,10 @@ if [ -r "$_lpeco_dir/maps" ]; then
   done
 else
   printf 'ERROR\tmaps\tpermission denied or process vanished\n'
-fi`
+fi
+_lpeco_after=$(_lpeco_read_start "$_lpeco_dir") || { printf 'ERROR\tidentity\tprocess vanished after collection\n'; exit 75; }
+printf 'END_STARTTIME\t%s\n' "$_lpeco_after"
+[ "$_lpeco_before" = "$_lpeco_after" ] || { printf 'ERROR\tidentity\tPID was reused during collection\n'; exit 75; }`
 
 func SnapshotDefinition() probe.Definition {
 	return probe.Definition{
@@ -71,19 +87,35 @@ func SnapshotDefinition() probe.Definition {
 }
 
 func EnvironmentDefinition(pid string) probe.Definition {
+	return EnvironmentDefinitionIdentity(pid, "0")
+}
+
+func EnvironmentDefinitionIdentity(pid, startTime string) probe.Definition {
+	suffix := pid
+	if startTime != "0" {
+		suffix += "." + startTime
+	}
 	return probe.Definition{
-		ID: "process.environment." + pid, Collector: "process", Parser: "env-v1", RedactionPolicy: "environment-values",
+		ID: "process.environment." + suffix, Collector: "process", Parser: "env-v1", RedactionPolicy: "environment-values",
 		SafetyClass: model.PassiveRead,
-		Variants:    []probe.Variant{{ID: "proc-posix", Command: adapter.Command{Script: environmentScript, Args: []string{pid}}}},
+		Variants:    []probe.Variant{{ID: "proc-posix", Command: adapter.Command{Script: environmentScript, Args: []string{pid, startTime}}}},
 		Timeout:     5 * time.Second, MaxOutput: 256 * 1024, Produces: []string{"process_environment"}, Idempotent: true,
 	}
 }
 
 func DependencyDefinition(pid string) probe.Definition {
+	return DependencyDefinitionIdentity(pid, "0")
+}
+
+func DependencyDefinitionIdentity(pid, startTime string) probe.Definition {
+	suffix := pid
+	if startTime != "0" {
+		suffix += "." + startTime
+	}
 	return probe.Definition{
-		ID: "process.dependencies." + pid, Collector: "process", Parser: "dependency-v1", RedactionPolicy: "paths",
+		ID: "process.dependencies." + suffix, Collector: "process", Parser: "dependency-v1", RedactionPolicy: "paths",
 		SafetyClass: model.PassiveRead,
-		Variants:    []probe.Variant{{ID: "proc-posix", Command: adapter.Command{Script: dependencyScript, Args: []string{pid}}}},
+		Variants:    []probe.Variant{{ID: "proc-posix", Command: adapter.Command{Script: dependencyScript, Args: []string{pid, startTime}}}},
 		Timeout:     10 * time.Second, MaxOutput: 2 * 1024 * 1024, Produces: []string{"process_dependency"}, Idempotent: true,
 	}
 }
@@ -94,6 +126,14 @@ func (Collector) ID() string { return "process" }
 
 func (Collector) Plan(_ model.HostProfile, discovery collect.Discovery) []probe.Definition {
 	definitions := []probe.Definition{SnapshotDefinition()}
+	if len(discovery.HighValueProcesses) > 0 {
+		for _, identity := range discovery.HighValueProcesses {
+			pid := strconv.Itoa(identity.PID)
+			start := strconv.FormatUint(identity.StartTime, 10)
+			definitions = append(definitions, EnvironmentDefinitionIdentity(pid, start), DependencyDefinitionIdentity(pid, start))
+		}
+		return definitions
+	}
 	for _, pid := range discovery.HighValuePIDs {
 		value := strconv.Itoa(pid)
 		definitions = append(definitions, EnvironmentDefinition(value), DependencyDefinition(value))
@@ -109,30 +149,54 @@ func (Collector) Parse(definition probe.Definition, result adapter.ExecResult, e
 		}
 		return Facts(parsed)
 	}
-	pidText := strings.TrimPrefix(definition.ID, "process.environment.")
+	pid, startTime, targetErr := targetedIdentity(definition.ID)
 	if definition.Parser == "env-v1" {
-		pid, err := strconv.Atoi(pidText)
-		if err != nil {
-			return nil, err
+		if targetErr != nil {
+			return nil, targetErr
 		}
-		parsed, err := ParseEnvironment(result.Stdout, pid, evidenceID)
+		parsed, err := ParseEnvironmentIdentity(result.Stdout, pid, startTime, evidenceID)
 		if err != nil {
 			return nil, err
 		}
 		return EnvironmentFacts(parsed)
 	}
 	if definition.Parser == "dependency-v1" {
-		pid, err := strconv.Atoi(strings.TrimPrefix(definition.ID, "process.dependencies."))
-		if err != nil {
-			return nil, err
+		if targetErr != nil {
+			return nil, targetErr
 		}
-		parsed, err := ParseDependencies(result.Stdout, pid, evidenceID)
+		parsed, err := ParseDependenciesIdentity(result.Stdout, pid, startTime, evidenceID)
 		if err != nil {
 			return nil, err
 		}
 		return DependencyFacts(parsed)
 	}
 	return nil, fmt.Errorf("unsupported process parser %q", definition.Parser)
+}
+
+func targetedIdentity(id string) (int, uint64, error) {
+	rest := id
+	for _, prefix := range []string{"process.environment.", "process.dependencies."} {
+		if value, found := strings.CutPrefix(id, prefix); found {
+			rest = value
+			break
+		}
+	}
+	parts := strings.Split(rest, ".")
+	if len(parts) < 1 || len(parts) > 2 {
+		return 0, 0, fmt.Errorf("invalid targeted process probe ID %q", id)
+	}
+	pid, err := strconv.Atoi(parts[0])
+	if err != nil || pid <= 0 {
+		return 0, 0, fmt.Errorf("invalid targeted process PID in %q", id)
+	}
+	if len(parts) == 1 {
+		return pid, 0, nil
+	}
+	startTime, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || startTime == 0 {
+		return 0, 0, fmt.Errorf("invalid targeted process start time in %q", id)
+	}
+	return pid, startTime, nil
 }
 
 var _ collect.Collector = Collector{}

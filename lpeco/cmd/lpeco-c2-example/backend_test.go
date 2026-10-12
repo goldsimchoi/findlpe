@@ -7,7 +7,7 @@ import (
 	"github.com/normalone/lpeco/internal/adapter/plugin"
 )
 
-func TestBackendDelayedExecPollLifecycle(t *testing.T) {
+func TestExamplePluginAsyncLifecycle(t *testing.T) {
 	backend := newBackend()
 	handshake := backend.handle(plugin.Request{JSONRPC: "2.0", ID: "1", Method: plugin.MethodHandshake})
 	var handshakeResult plugin.HandshakeResult
@@ -15,8 +15,14 @@ func TestBackendDelayedExecPollLifecycle(t *testing.T) {
 	if handshakeResult.Capabilities.ProtocolVersion != "1" || !handshakeResult.Capabilities.AsyncTasks || !handshakeResult.Capabilities.Cancel {
 		t.Fatalf("handshake capabilities = %#v", handshakeResult.Capabilities)
 	}
+	opened := backend.handle(requestWithParams(t, "open", plugin.MethodOpenSession, plugin.OpenSessionParams{}))
+	var session plugin.OpenSessionResult
+	decodeResult(t, opened, &session)
+	if session.SessionID == "" {
+		t.Fatal("open_session returned an empty session ID")
+	}
 
-	execResponse := backend.handle(requestWithParams(t, "2", plugin.MethodExec, plugin.ExecParams{Command: "fixture-delay=2"}))
+	execResponse := backend.handle(requestWithParams(t, "2", plugin.MethodExec, plugin.ExecParams{SessionID: session.SessionID, Command: "fixture-delay=2"}))
 	var accepted plugin.ExecAccepted
 	decodeResult(t, execResponse, &accepted)
 	if accepted.TaskID == "" {
@@ -32,6 +38,26 @@ func TestBackendDelayedExecPollLifecycle(t *testing.T) {
 		if pollNumber == 3 && (result.State != plugin.TaskComplete || string(result.Result.Stdout) != "fixture complete\n") {
 			t.Fatalf("final poll = %#v", result)
 		}
+	}
+
+	cancelExec := backend.handle(requestWithParams(t, "3", plugin.MethodExec, plugin.ExecParams{Command: "fixture-delay=5"}))
+	var cancelAccepted plugin.ExecAccepted
+	decodeResult(t, cancelExec, &cancelAccepted)
+	cancelResponse := backend.handle(requestWithParams(t, "4", plugin.MethodCancel, plugin.CancelParams{TaskID: cancelAccepted.TaskID}))
+	var cancelled plugin.CancelResult
+	decodeResult(t, cancelResponse, &cancelled)
+	if !cancelled.Cancelled {
+		t.Fatalf("cancel result = %#v", cancelled)
+	}
+	cancelPoll := backend.handle(requestWithParams(t, "5", plugin.MethodPoll, plugin.PollParams{TaskID: cancelAccepted.TaskID}))
+	var cancelledState plugin.PollResult
+	decodeResult(t, cancelPoll, &cancelledState)
+	if cancelledState.State != plugin.TaskCancelled {
+		t.Fatalf("poll after cancel = %#v", cancelledState)
+	}
+	closed := backend.handle(requestWithParams(t, "close", plugin.MethodCloseSession, plugin.CloseSessionParams{SessionID: session.SessionID}))
+	if closed.Error != nil || len(closed.Result) == 0 {
+		t.Fatalf("close_session response = %#v", closed)
 	}
 }
 

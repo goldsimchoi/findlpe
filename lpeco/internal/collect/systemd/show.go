@@ -46,6 +46,7 @@ type RuntimeUnit struct {
 	Properties            map[string]string                  `json:"properties"`
 	EvidenceIDs           []string                           `json:"evidence_ids"`
 	MissingFacts          []string                           `json:"missing_facts"`
+	FileInventory         bool                               `json:"file_inventory"`
 }
 
 func ParseShow(input []byte, evidenceID string) ([]RuntimeUnit, []CollectorDiagnostic) {
@@ -53,6 +54,7 @@ func ParseShow(input []byte, evidenceID string) ([]RuntimeUnit, []CollectorDiagn
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	lineNumber := 0
 	header := false
+	fileInventory := false
 	var units []RuntimeUnit
 	var diagnostics []CollectorDiagnostic
 	var current *RuntimeUnit
@@ -60,9 +62,10 @@ func ParseShow(input []byte, evidenceID string) ([]RuntimeUnit, []CollectorDiagn
 		lineNumber++
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if lineNumber == 1 {
-			if line != "LPECO_SYSTEMD_SHOW_V1" {
+			if line != "LPECO_SYSTEMD_SHOW_V1" && line != "LPECO_SYSTEMD_SHOW_V1\tfiles" {
 				return nil, []CollectorDiagnostic{{Code: "unsupported-show-format", Message: "systemctl show framing header is missing", EvidenceIDs: []string{evidenceID}}}
 			}
+			fileInventory = strings.HasSuffix(line, "\tfiles")
 			header = true
 			continue
 		}
@@ -72,7 +75,7 @@ func ParseShow(input []byte, evidenceID string) ([]RuntimeUnit, []CollectorDiagn
 				diagnostics = append(diagnostics, CollectorDiagnostic{Code: "malformed-unit-marker", Message: fmt.Sprintf("line %d", lineNumber), EvidenceIDs: []string{evidenceID}})
 				continue
 			}
-			current = &RuntimeUnit{Name: parts[2], Manager: parts[1], Properties: make(map[string]string), RuntimeExec: make(map[string]systemdunit.ExecCommand), EvidenceIDs: []string{evidenceID}}
+			current = &RuntimeUnit{Name: parts[2], Manager: parts[1], Properties: make(map[string]string), RuntimeExec: make(map[string]systemdunit.ExecCommand), EvidenceIDs: []string{evidenceID}, FileInventory: fileInventory}
 			continue
 		}
 		if line == "END_UNIT" {

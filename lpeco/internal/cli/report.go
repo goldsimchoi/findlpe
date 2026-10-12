@@ -12,6 +12,7 @@ import (
 var defaultLimitations = []string{
 	"Candidate ranking does not prove successful privilege escalation.",
 	"Read-only observations can be incomplete when permissions deny access or processes exit during collection.",
+	"Short-lived processes may be missed between /proc snapshots, and consumers can change during collection.",
 }
 
 func runReport(ctx context.Context, configuration Config, destination io.Writer) error {
@@ -39,7 +40,11 @@ func writeStoredReport(ctx context.Context, sessionStore *store.Store, sessionID
 	if err != nil {
 		return err
 	}
-	data := report.Data{Session: session, Facts: facts, Candidates: candidates, Evidence: evidence, Limitations: defaultLimitations}
+	data := report.Data{
+		Session: session, Facts: facts, Candidates: candidates, Evidence: evidence,
+		GraphDiagnostics: session.GraphDiagnostics, RuleDiagnostics: session.RuleDiagnostics,
+		Limitations: defaultLimitations,
+	}
 	switch format {
 	case "", "terminal":
 		return report.WriteTerminal(destination, data)

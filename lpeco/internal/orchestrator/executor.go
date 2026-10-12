@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -20,8 +21,13 @@ type plannedDefinition struct {
 }
 
 type phaseOutcome struct {
-	Interrupted bool
-	Incomplete  bool
+	Interrupted   bool
+	Incomplete    bool
+	ExecutionErr  error
+	ParseErr      error
+	Status        model.ProbeStatus
+	NeedsFallback bool
+	Facts         []model.Fact
 }
 
 type executionJob struct {
@@ -33,9 +39,28 @@ type executionJob struct {
 }
 
 func (r *runner) runDefinitions(ctx context.Context, phase Phase, planned []plannedDefinition) phaseOutcome {
+	definitions := make([]probe.Definition, 0, len(planned))
+	for _, item := range planned {
+		definitions = append(definitions, item.Definition)
+	}
+	registry, registryErr := probe.NewRegistry(definitions)
+	if registryErr != nil {
+		r.addIssue(phase, "", "build immutable probe registry: "+registryErr.Error(), registryErr)
+		return phaseOutcome{Interrupted: true, Incomplete: true}
+	}
 	jobs := make([]executionJob, 0, len(planned))
+	observableIDs := make([]string, 0)
+	outcome := phaseOutcome{}
 	policy := probe.Policy{AllowObservable: r.options.ObservableRead}
 	for _, item := range planned {
+		definition, registered := registry.Get(item.Definition.ID)
+		if !registered {
+			err := fmt.Errorf("probe %q is not registered", item.Definition.ID)
+			r.addIssue(phase, item.Definition.ID, err.Error(), err)
+			outcome.Incomplete = true
+			continue
+		}
+		item.Definition = definition
 		r.mu.Lock()
 		checkpoint := cloneCheckpoint(r.checkpoint)
 		r.mu.Unlock()
@@ -50,6 +75,11 @@ func (r *runner) runDefinitions(ctx context.Context, phase Phase, planned []plan
 			r.addIssue(phase, item.Definition.ID, decision.Err.Error(), decision.Err)
 			continue
 		case !decision.Run:
+			if (decision.Reason == probe.ReasonRetryLimit || decision.Reason == probe.ReasonNotRetryable) && hasIncompleteProbe(checkpoint, item.Definition.ID) {
+				err := fmt.Errorf("probe remains incomplete after its retry budget was exhausted")
+				r.addIssue(phase, item.Definition.ID, err.Error(), err)
+				outcome.Incomplete = true
+			}
 			continue
 		}
 		variant, err := r.planner.Select(item.Definition, r.caps, r.result.Profile, policy)
@@ -70,9 +100,31 @@ func (r *runner) runDefinitions(ctx context.Context, phase Phase, planned []plan
 		}
 		r.mu.Unlock()
 		jobs = append(jobs, executionJob{planned: item, variant: variant, base: base, attempt: attempt, wasRetried: attempt > 0})
+		if item.Definition.SafetyClass == model.ObservableRead {
+			observableIDs = append(observableIDs, item.Definition.ID)
+			r.mu.Lock()
+			r.result.ObservablePreview = append(r.result.ObservablePreview, item.Definition.ID)
+			r.mu.Unlock()
+		}
 	}
 	if len(jobs) == 0 {
-		return phaseOutcome{}
+		return outcome
+	}
+	if len(observableIDs) > 0 {
+		observableIDs = uniqueStrings(observableIDs)
+		if r.options.BeforeObservable == nil {
+			err := errors.New("observable-read probes require a pre-execution disclosure callback")
+			r.addIssue(phase, "", err.Error(), err)
+			outcome.Interrupted = true
+			outcome.Incomplete = true
+			return outcome
+		}
+		if err := r.options.BeforeObservable(append([]string(nil), observableIDs...)); err != nil {
+			r.addIssue(phase, "", "disclose observable-read probes: "+err.Error(), err)
+			outcome.Interrupted = true
+			outcome.Incomplete = true
+			return outcome
+		}
 	}
 	parallel := r.options.MaxParallel
 	if parallel > len(jobs) {
@@ -101,7 +153,6 @@ func (r *runner) runDefinitions(ctx context.Context, phase Phase, planned []plan
 		workers.Wait()
 		close(resultChannel)
 	}()
-	outcome := phaseOutcome{}
 	for value := range resultChannel {
 		outcome.Interrupted = outcome.Interrupted || value.Interrupted
 		outcome.Incomplete = outcome.Incomplete || value.Incomplete
@@ -111,21 +162,95 @@ func (r *runner) runDefinitions(ctx context.Context, phase Phase, planned []plan
 
 func (r *runner) executeJob(ctx context.Context, phase Phase, job executionJob) phaseOutcome {
 	outcome := r.executeAttempt(ctx, phase, job)
+	if outcome.NeedsFallback && !outcome.Interrupted {
+		fallback, err := r.fallbackJob(job)
+		if err != nil {
+			r.addIssue(phase, job.planned.Definition.ID, "select passive fallback: "+err.Error(), err)
+			return r.reportFinalOutcome(phase, job.planned.Definition.ID, outcome)
+		}
+		fallbackOutcome := r.executeAttempt(ctx, phase, fallback)
+		// A collector-requested fallback may provide a different half of the
+		// observation (for example, systemd runtime authority followed by unit
+		// file provenance). Keep both, but let complete fallback facts win ID
+		// collisions over partial facts from the first variant.
+		fallbackOutcome.Facts = append(fallbackOutcome.Facts, outcome.Facts...)
+		return r.reportFinalOutcome(phase, job.planned.Definition.ID, fallbackOutcome)
+	}
 	if outcome.Interrupted || !outcome.Incomplete || job.attempt > 0 || !job.planned.Definition.Idempotent || job.planned.Definition.SafetyClass != model.PassiveRead {
-		return outcome
+		return r.reportFinalOutcome(phase, job.planned.Definition.ID, outcome)
 	}
 	r.mu.Lock()
 	r.checkpoint.RetryCounts[job.planned.Definition.ID+"|"+job.base] = 1
 	r.checkpoint.UpdatedAt = r.options.Now()
-	checkpoint := cloneCheckpoint(r.checkpoint)
 	r.mu.Unlock()
-	if err := r.store.SaveCheckpoint(ctx, checkpoint); err != nil {
+	if err := r.persistCheckpoint(); err != nil {
 		r.addIssue(phase, job.planned.Definition.ID, "save retry checkpoint: "+err.Error(), err)
-		return phaseOutcome{Interrupted: true, Incomplete: true}
+		outcome.Interrupted = true
+		return r.reportFinalOutcome(phase, job.planned.Definition.ID, outcome)
 	}
 	job.attempt = 1
 	job.wasRetried = true
-	return r.executeAttempt(ctx, phase, job)
+	// A retry supersedes the first incomplete observation. Its raw evidence
+	// remains stored, while only facts derived from the final attempt enter the
+	// semantic graph.
+	return r.reportFinalOutcome(phase, job.planned.Definition.ID, r.executeAttempt(ctx, phase, job))
+}
+
+func (r *runner) fallbackJob(job executionJob) (executionJob, error) {
+	definition := job.planned.Definition
+	selected := -1
+	for index, variant := range definition.Variants {
+		if variant.ID == job.variant.ID {
+			selected = index
+			break
+		}
+	}
+	if selected < 0 || selected+1 >= len(definition.Variants) {
+		return executionJob{}, fmt.Errorf("probe %q has no remaining variant", definition.ID)
+	}
+	definition.Variants = append([]probe.Variant(nil), definition.Variants[selected+1:]...)
+	variant, err := r.planner.Select(definition, r.caps, r.result.Profile, probe.Policy{AllowObservable: r.options.ObservableRead})
+	if err != nil {
+		return executionJob{}, err
+	}
+	base, err := inputFingerprint(definition, variant)
+	if err != nil {
+		return executionJob{}, err
+	}
+	job.planned.Definition = definition
+	job.variant = variant
+	job.base = base
+	job.attempt = 0
+	job.wasRetried = false
+	return job, nil
+}
+
+func (r *runner) reportFinalOutcome(phase Phase, probeID string, outcome phaseOutcome) phaseOutcome {
+	reported := false
+	persistContext, cancelPersist := r.persistenceContext()
+	defer cancelPersist()
+	if err := r.appendUniqueFacts(persistContext, outcome.Facts); err != nil {
+		r.addIssue(phase, probeID, "store facts: "+err.Error(), err)
+		outcome.Interrupted = true
+		outcome.Incomplete = true
+		reported = true
+	}
+	outcome.Facts = nil
+	if outcome.ExecutionErr != nil {
+		r.addIssue(phase, probeID, "execute probe: "+outcome.ExecutionErr.Error(), outcome.ExecutionErr)
+		outcome.ExecutionErr = nil
+		reported = true
+	}
+	if outcome.ParseErr != nil {
+		r.addIssue(phase, probeID, "parse probe output: "+outcome.ParseErr.Error(), outcome.ParseErr)
+		outcome.ParseErr = nil
+		reported = true
+	}
+	if outcome.Incomplete && !reported {
+		err := fmt.Errorf("probe observation is %s", outcome.Status)
+		r.addIssue(phase, probeID, err.Error(), err)
+	}
+	return outcome
 }
 
 func (r *runner) executeAttempt(ctx context.Context, phase Phase, job executionJob) phaseOutcome {
@@ -133,22 +258,41 @@ func (r *runner) executeAttempt(ctx context.Context, phase Phase, job executionJ
 	fingerprint := fmt.Sprintf("%s-attempt-%d", job.base, job.attempt)
 	request := adapter.ExecRequest{ProbeID: definition.ID, VariantID: job.variant.ID, Command: job.variant.Command, Timeout: definition.Timeout, MaxOutput: job.variant.MaxOutput}
 	result, execErr := r.transport.Exec(ctx, request)
-	if execErr != nil {
-		r.recordCompletion(ctx, phase, definition.ID, fingerprint, model.ProbeUnavailable, "")
-		r.addIssue(phase, definition.ID, "execute probe: "+execErr.Error(), execErr)
-		return phaseOutcome{Interrupted: true, Incomplete: true}
-	}
 	if result.StartedAt.IsZero() {
 		result.StartedAt = r.options.Now()
 	}
 	if result.FinishedAt.IsZero() {
 		result.FinishedAt = r.options.Now()
 	}
-	if result.Status == "" {
+	if execErr != nil && (result.Status == "" || result.Status == model.ProbeComplete) {
+		switch {
+		case errors.Is(execErr, context.DeadlineExceeded):
+			result.Status = model.ProbeTimeout
+		case len(result.Stdout) > 0 || len(result.Stderr) > 0:
+			result.Status = model.ProbePartial
+		default:
+			result.Status = model.ProbeUnavailable
+		}
+	} else if result.Status == "" {
 		result.Status = model.ProbeComplete
 	}
 	if result.Truncated && result.Status == model.ProbeComplete {
 		result.Status = model.ProbeTruncated
+	}
+	if result.ExitCode != nil && *result.ExitCode != 0 && result.Status == model.ProbeComplete {
+		if len(result.Stdout) > 0 || len(result.Stderr) > 0 {
+			result.Status = model.ProbePartial
+		} else {
+			result.Status = model.ProbeUnavailable
+		}
+	}
+	needsFallback := false
+	if assessor, ok := job.planned.Collector.(collect.ObservationAssessor); ok {
+		assessment := assessor.Assess(definition, job.variant, result)
+		if assessment.Status != "" {
+			result.Status = assessment.Status
+		}
+		needsFallback = assessment.Fallback
 	}
 	body := evidenceBody(result)
 	evidenceID, err := predictedEvidenceID(r.options.SessionID, definition.ID, fingerprint, body)
@@ -156,17 +300,24 @@ func (r *runner) executeAttempt(ctx context.Context, phase Phase, job executionJ
 		r.addIssue(phase, definition.ID, "derive evidence ID: "+err.Error(), err)
 		return phaseOutcome{Interrupted: true, Incomplete: true}
 	}
-	facts, parseErr := job.planned.Collector.Parse(definition, result, evidenceID)
+	var facts []model.Fact
+	var parseErr error
+	if execErr == nil || len(result.Stdout) > 0 {
+		facts, parseErr = job.planned.Collector.Parse(definition, result, evidenceID)
+	}
 	status := result.Status
-	if parseErr != nil {
+	if parseErr != nil && status == model.ProbeComplete {
 		status = model.ProbeParseError
 	}
+	facts = annotateObservation(facts, status, definition.ID)
 	evidence := model.Evidence{
 		SessionID: r.options.SessionID, ProbeID: definition.ID, VariantID: job.variant.ID, Adapter: r.caps.TransportKind,
 		InputFingerprint: fingerprint, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt,
 		Status: status, ExitCode: result.ExitCode, MergedOutput: result.MergedOutput, Truncated: result.Truncated,
 	}
-	stored, _, storeErr := r.store.PutEvidence(ctx, evidence, bytes.NewReader(body))
+	persistContext, cancelPersist := r.persistenceContext()
+	defer cancelPersist()
+	stored, _, storeErr := r.store.PutEvidence(persistContext, evidence, bytes.NewReader(body))
 	if storeErr != nil {
 		r.addIssue(phase, definition.ID, "store evidence: "+storeErr.Error(), storeErr)
 		return phaseOutcome{Interrupted: true, Incomplete: true}
@@ -176,17 +327,19 @@ func (r *runner) executeAttempt(ctx context.Context, phase Phase, job executionJ
 		r.addIssue(phase, definition.ID, err.Error(), err)
 		return phaseOutcome{Interrupted: true, Incomplete: true}
 	}
+	r.mu.Lock()
+	r.evidence[stored.ID] = status
+	r.mu.Unlock()
 	if parseErr != nil {
-		r.addIssue(phase, definition.ID, "parse probe output: "+parseErr.Error(), parseErr)
 		facts = nil
 	}
-	if err := r.appendUniqueFacts(ctx, facts); err != nil {
-		r.addIssue(phase, definition.ID, "store facts: "+err.Error(), err)
-		return phaseOutcome{Interrupted: true, Incomplete: true}
-	}
-	r.recordCompletion(ctx, phase, definition.ID, fingerprint, status, stored.ID)
+	r.recordCompletion(phase, definition.ID, fingerprint, status, stored.ID)
 	incomplete := status != model.ProbeComplete || result.Truncated
-	return phaseOutcome{Incomplete: incomplete}
+	if execErr != nil {
+		fatal := ctx.Err() != nil || isRawTransport(r.caps.TransportKind) || !adapter.IsRetryable(execErr)
+		return phaseOutcome{Interrupted: fatal, Incomplete: true, ExecutionErr: execErr, ParseErr: parseErr, Status: status, NeedsFallback: needsFallback, Facts: facts}
+	}
+	return phaseOutcome{Incomplete: incomplete, ParseErr: parseErr, Status: status, NeedsFallback: needsFallback, Facts: facts}
 }
 
 func (r *runner) appendUniqueFacts(ctx context.Context, facts []model.Fact) error {
@@ -220,16 +373,37 @@ func (r *runner) appendUniqueFacts(ctx context.Context, facts []model.Fact) erro
 	return nil
 }
 
-func (r *runner) recordCompletion(ctx context.Context, phase Phase, probeID, fingerprint string, status model.ProbeStatus, evidenceID string) {
+func (r *runner) recordCompletion(phase Phase, probeID, fingerprint string, status model.ProbeStatus, evidenceID string) {
 	r.mu.Lock()
 	key := probeID + "|" + fingerprint
 	r.checkpoint.Completed[key] = model.CompletedProbe{ProbeID: probeID, InputFingerprint: fingerprint, Status: status, EvidenceID: evidenceID}
 	r.checkpoint.UpdatedAt = r.options.Now()
-	checkpoint := cloneCheckpoint(r.checkpoint)
 	r.mu.Unlock()
-	if err := r.store.SaveCheckpoint(ctx, checkpoint); err != nil {
+	if err := r.persistCheckpoint(); err != nil {
 		r.addIssue(phase, probeID, "save probe checkpoint: "+err.Error(), err)
 	}
+}
+
+func annotateObservation(facts []model.Fact, status model.ProbeStatus, probeID string) []model.Fact {
+	if status == "" {
+		status = model.ProbeUnavailable
+	}
+	for index := range facts {
+		facts[index].ObservationStatus = status
+		if status == model.ProbeComplete {
+			continue
+		}
+		facts[index].MissingFacts = uniqueStrings(append(facts[index].MissingFacts, fmt.Sprintf("probe %s observation is %s", probeID, status)))
+		switch status {
+		case model.ProbeUnavailable, model.ProbeTimeout, model.ProbeParseError:
+			facts[index].Confidence = model.ConfidenceLow
+		default:
+			if facts[index].Confidence == model.ConfidenceHigh || facts[index].Confidence == "" {
+				facts[index].Confidence = model.ConfidenceMedium
+			}
+		}
+	}
+	return facts
 }
 
 func inputFingerprint(definition probe.Definition, variant probe.Variant) (string, error) {

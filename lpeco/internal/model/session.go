@@ -38,13 +38,15 @@ type Checkpoint struct {
 }
 
 type Session struct {
-	SchemaVersion int           `json:"schema_version"`
-	ID            string        `json:"id"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
-	Status        SessionStatus `json:"status"`
-	TransportKind string        `json:"transport_kind"`
-	Target        string        `json:"target,omitempty"`
-	Profile       HostProfile   `json:"profile"`
-	Checkpoint    Checkpoint    `json:"checkpoint"`
+	SchemaVersion    int               `json:"schema_version"`
+	ID               string            `json:"id"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+	Status           SessionStatus     `json:"status"`
+	TransportKind    string            `json:"transport_kind"`
+	Target           string            `json:"target,omitempty"`
+	Profile          HostProfile       `json:"profile"`
+	Checkpoint       Checkpoint        `json:"checkpoint"`
+	GraphDiagnostics []GraphDiagnostic `json:"graph_diagnostics,omitempty"`
+	RuleDiagnostics  []RuleDiagnostic  `json:"rule_diagnostics,omitempty"`
 }

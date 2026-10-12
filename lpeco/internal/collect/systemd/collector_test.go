@@ -1,6 +1,7 @@
 package systemd
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,6 +68,96 @@ func TestNormalizeCombinesRuntimeAuthorityWithFileProvenance(t *testing.T) {
 	security := normalizedSecurity(t, normalized.Security, "demo.service")
 	if !security.NoNewPrivileges || !reflect.DeepEqual(security.CapabilityBoundingSet, []string{"cap_chown", "cap_setuid"}) {
 		t.Fatalf("unit security = %#v", security)
+	}
+}
+
+func TestReconcileFactsCombinesSeparateRuntimeAndFileObservations(t *testing.T) {
+	collector := Collector{}
+	runtimeFacts, err := collector.Parse(ShowDefinition("system"), adapter.ExecResult{
+		Stdout: readSystemdFixture(t, "../../../testdata/systemd/show/full.txt"), Status: model.ProbeComplete,
+	}, "evidence-show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileFacts, err := collector.Parse(CatDefinition("system", "demo.service"), adapter.ExecResult{
+		Stdout: readSystemdFixture(t, "../../../testdata/systemd/cat/demo.cat"), Status: model.ProbeComplete,
+	}, "evidence-cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, diagnostics := ReconcileFacts(append(runtimeFacts, fileFacts...))
+	if !hasDiagnostic(diagnostics, "runtime-file-mismatch") {
+		t.Fatalf("runtime/file mismatch diagnostic missing: %#v", diagnostics)
+	}
+	var demo UnitFact
+	var start ExecFact
+	for _, fact := range reconciled {
+		switch fact.Kind {
+		case "systemd_unit":
+			var value UnitFact
+			_ = json.Unmarshal(fact.Data, &value)
+			if value.Name == "demo.service" && value.Manager == "system" {
+				demo = value
+			}
+		case "systemd_exec":
+			var value ExecFact
+			_ = json.Unmarshal(fact.Data, &value)
+			if value.UnitName == "demo.service" && value.Directive == "ExecStart" && value.Manager == "system" {
+				start = value
+			}
+		}
+	}
+	if !demo.RuntimeObserved || !demo.FilesObserved || demo.Confidence != model.ConfidenceHigh {
+		t.Fatalf("reconciled unit = %#v", demo)
+	}
+	if start.Command.Executable != "/usr/bin/runtime-demo" || start.Source.EvidenceID != "evidence-cat" || start.Confidence != model.ConfidenceHigh {
+		t.Fatalf("reconciled ExecStart = %#v", start)
+	}
+}
+
+func TestCatFactsCarryManagerScopeAndUserOwnership(t *testing.T) {
+	input := append([]byte("LPECO_MANAGER\tuser\t1000\n"), readSystemdFixture(t, "../../../testdata/systemd/cat/file-only.cat")...)
+	facts, err := (Collector{}).Parse(CatDefinition("user", "file-only.service"), adapter.ExecResult{Stdout: input, Status: model.ProbeComplete}, "evidence-user-file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fact := range facts {
+		switch fact.Kind {
+		case "systemd_unit":
+			var value UnitFact
+			_ = json.Unmarshal(fact.Data, &value)
+			if value.Manager != "user" || value.ManagerUID != 1000 || value.UID != 1000 || !value.InventoryOnly {
+				t.Fatalf("user unit scope = %#v", value)
+			}
+		case "systemd_unit_source":
+			var value UnitSourceFact
+			_ = json.Unmarshal(fact.Data, &value)
+			if value.Manager != "user" || value.ManagerUID != 1000 {
+				t.Fatalf("user source scope = %#v", value)
+			}
+		case "systemd_exec":
+			var value ExecFact
+			_ = json.Unmarshal(fact.Data, &value)
+			if value.Manager != "user" || value.ManagerUID != 1000 {
+				t.Fatalf("user exec scope = %#v", value)
+			}
+		}
+	}
+}
+
+func TestSystemctlHeaderOnlyObservationRequestsFileFallback(t *testing.T) {
+	definition := ShowDefinition("system")
+	assessment := (Collector{}).Assess(definition, definition.Variants[0], adapter.ExecResult{
+		Stdout: []byte("LPECO_SYSTEMD_SHOW_V1\n"), Status: model.ProbeComplete,
+	})
+	if !assessment.Fallback || assessment.Status != model.ProbePartial {
+		t.Fatalf("assessment = %#v, want partial fallback", assessment)
+	}
+	fileAssessment := (Collector{}).Assess(definition, definition.Variants[1], adapter.ExecResult{
+		Stdout: []byte("LPECO_SYSTEMD_SHOW_V1\n"), Status: model.ProbeComplete,
+	})
+	if fileAssessment.Fallback {
+		t.Fatalf("file variant recursively requested fallback: %#v", fileAssessment)
 	}
 }
 

@@ -157,6 +157,32 @@ func TestCollectorPlansEnvironmentAndDependenciesOnlyForHighValuePIDs(t *testing
 	}
 }
 
+func TestCollectorCarriesExpectedStartTimeIntoTargetedProbes(t *testing.T) {
+	definitions := (Collector{}).Plan(model.HostProfile{}, collect.Discovery{HighValueProcesses: []collect.ProcessIdentity{{PID: 101, StartTime: 4242}}})
+	wantIDs := []string{"process.snapshot", "process.environment.101.4242", "process.dependencies.101.4242"}
+	var gotIDs []string
+	for _, definition := range definitions {
+		gotIDs = append(gotIDs, definition.ID)
+		if definition.ID != "process.snapshot" && !reflect.DeepEqual(definition.Variants[0].Command.Args, []string{"101", "4242"}) {
+			t.Fatalf("targeted args = %#v", definition.Variants[0].Command.Args)
+		}
+	}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("targeted process plan IDs = %#v, want %#v", gotIDs, wantIDs)
+	}
+}
+
+func TestTargetedParserRecordsVerifiedStartTime(t *testing.T) {
+	input := []byte("LPECO_DEP_V1\nSTARTTIME\t4242\nMAP\t2f6f70742f64656d6f2e736f\nEND_STARTTIME\t4242\n")
+	parsed, err := ParseDependenciesIdentity(input, 101, 4242, "evidence-deps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.StartTime != 4242 || len(parsed.MappedFiles) != 1 {
+		t.Fatalf("parsed dependency identity = %#v", parsed)
+	}
+}
+
 func TestParseTargetedDependenciesAndEnvironmentFacts(t *testing.T) {
 	dependencies, err := ParseDependencies(readProcessFixture(t, "../../../testdata/proc/debian/dependencies.txt"), 101, "evidence-deps")
 	if err != nil {

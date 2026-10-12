@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/normalone/lpeco/internal/adapter/raw"
 )
@@ -65,5 +66,8 @@ func TestParseCommonScanControls(t *testing.T) {
 	}
 	if configuration.Common.StateDir != "/tmp/state" || configuration.Common.Observe.String() != "5s" || !configuration.Common.Full || configuration.Common.MaxOutput != 8192 {
 		t.Fatalf("common configuration = %#v", configuration.Common)
+	}
+	if got := scanOptions(configuration, "session").ProcessObservation; got != 5*time.Second {
+		t.Fatalf("orchestrator observation = %s, want 5s", got)
 	}
 }

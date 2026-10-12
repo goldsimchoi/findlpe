@@ -45,6 +45,7 @@ type RPCClient struct {
 	done      chan struct{}
 	failOnce  sync.Once
 	closeOnce sync.Once
+	terminate func() error
 
 	diagnosticMu sync.Mutex
 	diagnostics  []byte
@@ -58,7 +59,7 @@ type responseOrError struct {
 
 func NewRPCClient(input io.WriteCloser, output io.Reader, stderr io.Reader, wait func() error, options ClientOptions) *RPCClient {
 	if options.MaxLineBytes <= 0 {
-		options.MaxLineBytes = 1024 * 1024
+		options.MaxLineBytes = 8 * 1024 * 1024
 	}
 	if options.StderrLimit <= 0 {
 		options.StderrLimit = 64 * 1024
@@ -89,6 +90,25 @@ func NewRPCClient(input io.WriteCloser, output io.Reader, stderr io.Reader, wait
 		}()
 	}
 	return client
+}
+
+func (c *RPCClient) setTerminator(terminate func() error) {
+	c.mu.Lock()
+	c.terminate = terminate
+	c.mu.Unlock()
+}
+
+func (c *RPCClient) Terminate() error {
+	c.mu.Lock()
+	terminate := c.terminate
+	c.mu.Unlock()
+	closeErr := c.Close()
+	if terminate != nil {
+		if err := terminate(); err != nil && closeErr == nil {
+			return err
+		}
+	}
+	return closeErr
 }
 
 func (c *RPCClient) Call(ctx context.Context, method string, params, destination any) error {
@@ -292,6 +312,7 @@ func (c *RPCClient) Close() error {
 type Options struct {
 	PollInterval       time.Duration
 	MaxLineBytes       int
+	MaxOutputBytes     int
 	StderrLimit        int
 	OpenSessionOptions map[string]string
 	Environment        []string
@@ -342,8 +363,25 @@ func (a *Adapter) Open(ctx context.Context) (adapter.Capabilities, error) {
 	}
 	a.sessionID = opened.SessionID
 	a.capabilities = handshake.Capabilities
+	protocolLimit := protocolOutputLimit(a.client.options.MaxLineBytes)
+	if a.capabilities.MaxOutputBytes <= 0 || protocolLimit < a.capabilities.MaxOutputBytes {
+		a.capabilities.MaxOutputBytes = protocolLimit
+	}
+	if a.options.MaxOutputBytes > 0 && a.options.MaxOutputBytes < a.capabilities.MaxOutputBytes {
+		a.capabilities.MaxOutputBytes = a.options.MaxOutputBytes
+	}
 	a.opened = true
 	return a.capabilities, nil
+}
+
+func protocolOutputLimit(maxLineBytes int) int {
+	const envelopeReserve = 64 * 1024
+	if maxLineBytes <= envelopeReserve {
+		return max(1, maxLineBytes/4)
+	}
+	// []byte fields use base64 in JSON. Reserve envelope space, then apply
+	// the inverse 4/3 expansion to the combined stdout/stderr budget.
+	return (maxLineBytes - envelopeReserve) * 3 / 4
 }
 
 func (a *Adapter) Exec(ctx context.Context, request adapter.ExecRequest) (adapter.ExecResult, error) {
@@ -432,11 +470,11 @@ func (a *Adapter) Exec(ctx context.Context, request adapter.ExecRequest) (adapte
 		case TaskFailed:
 			result.Status = model.ProbePartial
 			result.FinishedAt = time.Now().UTC()
-			return result, fmt.Errorf("plugin task failed: %s", polled.Error)
+			return result, adapter.MarkRetryable(fmt.Errorf("plugin task failed: %s", polled.Error))
 		case TaskCancelled:
 			result.Status = model.ProbePartial
 			result.FinishedAt = time.Now().UTC()
-			return result, context.Canceled
+			return result, adapter.MarkRetryable(context.Canceled)
 		default:
 			result.Status = model.ProbeParseError
 			result.FinishedAt = time.Now().UTC()
@@ -459,11 +497,11 @@ func (a *Adapter) execFailure(result adapter.ExecResult, execContext context.Con
 	result.FinishedAt = time.Now().UTC()
 	if errors.Is(execContext.Err(), context.DeadlineExceeded) {
 		result.Status = model.ProbeTimeout
-		return result, context.DeadlineExceeded
+		return result, adapter.MarkRetryable(context.DeadlineExceeded)
 	}
 	if errors.Is(execContext.Err(), context.Canceled) {
 		result.Status = model.ProbePartial
-		return result, context.Canceled
+		return result, adapter.MarkRetryable(context.Canceled)
 	}
 	result.Status = model.ProbePartial
 	return result, err
@@ -506,6 +544,9 @@ func (a *Adapter) Close(ctx context.Context) error {
 	var callErr error
 	if opened {
 		callErr = a.client.Call(ctx, MethodCloseSession, CloseSessionParams{SessionID: sessionID}, nil)
+	}
+	if callErr != nil && ctx.Err() != nil {
+		_ = a.client.Terminate()
 	}
 	closeErr := a.client.Close()
 	if callErr != nil {

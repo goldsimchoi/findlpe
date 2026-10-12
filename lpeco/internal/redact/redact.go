@@ -114,12 +114,17 @@ func redactValue(key string, value any) any {
 		return result
 	case map[string]any:
 		result := make(map[string]any, len(typed))
+		sensitive, _ := typed["sensitive"].(bool)
 		keys := make([]string, 0, len(typed))
 		for child := range typed {
 			keys = append(keys, child)
 		}
 		sort.Strings(keys)
 		for _, child := range keys {
+			if sensitive && strings.EqualFold(child, "value") {
+				result[child] = Redacted
+				continue
+			}
 			if strings.EqualFold(key, "environment") || strings.EqualFold(key, "env") {
 				if text, ok := typed[child].(string); ok {
 					result[child] = Environment(map[string]string{child: text})[child]

@@ -1,9 +1,11 @@
 package systemd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +33,7 @@ while IFS= read -r _lpeco_unit; do
   printf 'END_UNIT\n'
 done`
 
-const unitFileInventoryScript = `printf 'LPECO_SYSTEMD_SHOW_V1\n'
+const unitFileInventoryScript = `printf 'LPECO_SYSTEMD_SHOW_V1\tfiles\n'
 _lpeco_manager=$1
 case "$_lpeco_manager" in
   system) set -- /etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system /lib/systemd/system ;;
@@ -43,19 +45,25 @@ for _lpeco_root do
     [ -f "$_lpeco_path" ] || [ -L "$_lpeco_path" ] || continue
     _lpeco_unit=${_lpeco_path##*/}
     printf 'UNIT\t%s\t%s\n' "$_lpeco_manager" "$_lpeco_unit"
-    printf 'Id=%s\nFragmentPath=%s\nEND_UNIT\n' "$_lpeco_unit" "$_lpeco_path"
+    printf 'Id=%s\nFragmentPath=%s\n' "$_lpeco_unit" "$_lpeco_path"
+    if [ "$_lpeco_manager" = user ]; then printf 'ManagerUID=%s\n' "$(id -u 2>/dev/null)"; fi
+    printf 'END_UNIT\n'
   done
 done`
 
-const catScript = `case "$1" in system) _lpeco_scope= ;; user) _lpeco_scope=--user ;; *) exit 64 ;; esac
+const catScript = `_lpeco_manager=$1
+case "$1" in system) _lpeco_scope=; _lpeco_manager_uid=0 ;; user) _lpeco_scope=--user; _lpeco_manager_uid=$(id -u 2>/dev/null) ;; *) exit 64 ;; esac
 case "$2" in ''|-*) exit 64 ;; esac
+printf 'LPECO_MANAGER\t%s\t%s\n' "$_lpeco_manager" "$_lpeco_manager_uid"
 LC_ALL=C systemctl $_lpeco_scope cat --no-pager -- "$2"`
 
-const unitFileCatScript = `case "$1" in
-  system) set -- "$2" /lib/systemd/system /usr/lib/systemd/system /usr/local/lib/systemd/system /run/systemd/system /etc/systemd/system ;;
-  user) set -- "$2" /usr/share/systemd/user /usr/local/share/systemd/user "$HOME/.local/share/systemd/user" "${XDG_RUNTIME_DIR:-/run/user/$(id -u 2>/dev/null)}/systemd/user" "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user" ;;
+const unitFileCatScript = `_lpeco_manager=$1
+case "$1" in
+  system) _lpeco_manager_uid=0; set -- "$2" /lib/systemd/system /usr/lib/systemd/system /usr/local/lib/systemd/system /run/systemd/system /etc/systemd/system ;;
+  user) _lpeco_manager_uid=$(id -u 2>/dev/null); set -- "$2" /usr/share/systemd/user /usr/local/share/systemd/user "$HOME/.local/share/systemd/user" "${XDG_RUNTIME_DIR:-/run/user/$(id -u 2>/dev/null)}/systemd/user" "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user" ;;
   *) exit 64 ;;
 esac
+printf 'LPECO_MANAGER\t%s\t%s\n' "$_lpeco_manager" "$_lpeco_manager_uid"
 _lpeco_unit=$1
 shift
 case "$_lpeco_unit" in ''|-*|*/*) exit 64 ;; esac
@@ -107,6 +115,32 @@ type Collector struct{}
 
 func (Collector) ID() string { return "systemd" }
 
+func (Collector) Assess(definition probe.Definition, variant probe.Variant, result adapter.ExecResult) collect.ObservationAssessment {
+	assessment := collect.ObservationAssessment{Status: result.Status}
+	if variant.ID != "systemctl" {
+		return assessment
+	}
+	failed := result.Status != "" && result.Status != model.ProbeComplete
+	if result.ExitCode != nil && *result.ExitCode != 0 {
+		failed = true
+	}
+	switch definition.Parser {
+	case "systemd-show-v1":
+		failed = failed || !bytes.Contains(result.Stdout, []byte("\nUNIT\t")) || bytes.Contains(result.Stdout, []byte("CollectionError="))
+	case "systemd-cat-v1":
+		failed = failed || !bytes.Contains(result.Stdout, []byte("\n# /"))
+	}
+	if failed {
+		assessment.Fallback = true
+		if len(result.Stdout) > 0 || len(result.Stderr) > 0 {
+			assessment.Status = model.ProbePartial
+		} else {
+			assessment.Status = model.ProbeUnavailable
+		}
+	}
+	return assessment
+}
+
 func (Collector) Plan(profile model.HostProfile, discovery collect.Discovery) []probe.Definition {
 	if !profile.SystemdRunning {
 		return nil
@@ -146,17 +180,57 @@ func (Collector) Parse(definition probe.Definition, result adapter.ExecResult, e
 		if len(documents) == 0 {
 			return []model.Fact{collectionStatusFact(definition, result, evidenceID, diagnostics)}, nil
 		}
-		normalized := Normalize(nil, map[string][]DocumentSet{unit: {{Documents: documents, Complete: result.Status == model.ProbeComplete}}}, -1)
-		if manager == "user" {
-			for index := range normalized.Units {
-				normalized.Units[index].Manager = "user"
-				normalized.Units[index].InventoryOnly = true
-			}
-		}
+		managerUID := managerUIDFromCat(result.Stdout, manager)
+		normalized := Normalize(nil, map[string][]DocumentSet{unit: {{Documents: documents, Complete: result.Status == model.ProbeComplete}}}, managerUID)
+		applyScope(&normalized, manager, managerUID)
 		normalized.Diagnostics = append(normalized.Diagnostics, diagnostics...)
 		return Facts(normalized)
 	default:
 		return nil, fmt.Errorf("unsupported systemd parser %q", definition.Parser)
+	}
+}
+
+func managerUIDFromCat(input []byte, manager string) int {
+	if manager == "system" {
+		return 0
+	}
+	firstLine := strings.SplitN(string(input), "\n", 2)[0]
+	parts := strings.Split(firstLine, "\t")
+	if len(parts) == 3 && parts[0] == "LPECO_MANAGER" && parts[1] == manager {
+		if uid, err := strconv.Atoi(parts[2]); err == nil && uid >= 0 {
+			return uid
+		}
+	}
+	return -1
+}
+
+func applyScope(normalized *Normalized, manager string, managerUID int) {
+	for index := range normalized.Units {
+		normalized.Units[index].Manager = manager
+		normalized.Units[index].ManagerUID = managerUID
+		if manager == "user" {
+			normalized.Units[index].UID = managerUID
+			normalized.Units[index].GID = -1
+			normalized.Units[index].User = ""
+			normalized.Units[index].Group = ""
+			normalized.Units[index].InventoryOnly = true
+		}
+	}
+	for index := range normalized.Sources {
+		normalized.Sources[index].Manager = manager
+		normalized.Sources[index].ManagerUID = managerUID
+	}
+	for index := range normalized.Execs {
+		normalized.Execs[index].Manager = manager
+		normalized.Execs[index].ManagerUID = managerUID
+	}
+	for index := range normalized.Activations {
+		normalized.Activations[index].Manager = manager
+		normalized.Activations[index].ManagerUID = managerUID
+	}
+	for index := range normalized.Security {
+		normalized.Security[index].Manager = manager
+		normalized.Security[index].ManagerUID = managerUID
 	}
 }
 
@@ -196,7 +270,7 @@ func collectionStatusFact(definition probe.Definition, result adapter.ExecResult
 
 func currentManagerUID(units []RuntimeUnit) int {
 	for _, unit := range units {
-		if unit.Manager == "user" && unit.ManagerUID != 0 {
+		if unit.Manager == "user" {
 			return unit.ManagerUID
 		}
 	}

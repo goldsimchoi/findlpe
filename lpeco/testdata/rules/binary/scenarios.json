@@ -67,7 +67,7 @@
       ]
     },
     {
-      "name":"file-capability-inventory-only","rule_id":"binary.capability-boundary","current":"attacker","want_count":0,"want_diagnostic":"inventory-only",
+      "name":"file-capability-inventory-only","rule_id":"binary.capability-boundary","current":"attacker","want_count":1,"want_priority":"P2","want_missing":["control"],
       "nodes":[
         {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
         {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
@@ -88,6 +88,20 @@
         {"kind":"RUNS_AS","from":"binary","to":"attacker"},
         {"kind":"CAN_WRITE","from":"attacker","to":"binary","attributes":{"controlled":true}},
         {"kind":"CAN_EXECUTE","from":"attacker","to":"binary","attributes":{"reachable":true}}
+      ]
+    },
+    {
+      "name":"capability-disabled-by-nosuid-mount","rule_id":"binary.capability-boundary","current":"attacker","want_count":0,
+      "nodes":[
+        {"key":"attacker","kind":"Principal","label":"uid:1000","attributes":{"uid":1000}},
+        {"key":"root","kind":"Principal","label":"uid:0","attributes":{"uid":0}},
+        {"key":"binary","kind":"Executable","label":"/mnt/tools/cap-helper","attributes":{"capabilities":["cap_setuid=ep"],"capability_boundary":true}},
+        {"key":"mount","kind":"Mount","label":"/mnt/tools","attributes":{"nosuid":true}}
+      ],
+      "edges":[
+        {"kind":"RUNS_AS","from":"binary","to":"root"},
+        {"kind":"CAN_EXECUTE","from":"attacker","to":"binary","attributes":{"reachable":true}},
+        {"kind":"LOCATED_ON","from":"binary","to":"mount"}
       ]
     },
     {

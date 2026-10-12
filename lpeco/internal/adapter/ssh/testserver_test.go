@@ -150,6 +150,7 @@ func defaultSSHHandler(command string, channel cryptossh.Channel) {
 		_, _ = channel.Stderr().Write([]byte("ERR"))
 		exitCode = 7
 	case strings.Contains(command, "slow"):
+		_, _ = channel.Write([]byte("early"))
 		time.Sleep(250 * time.Millisecond)
 		_, _ = channel.Write([]byte("late"))
 	default:

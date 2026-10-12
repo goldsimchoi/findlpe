@@ -22,7 +22,9 @@ type graphBuilder struct {
 	graph            *Graph
 	diagnostics      []Diagnostic
 	unitByName       map[string][]model.NodeRef
-	processByPID     map[int]model.NodeRef
+	unitByKey        map[string]model.NodeRef
+	processByPID     map[int][]model.NodeRef
+	processByKey     map[string]model.NodeRef
 	pathRefs         map[string][]model.NodeRef
 	identity         *contextcollect.IdentityFact
 	currentPrincipal model.Principal
@@ -36,15 +38,20 @@ type graphBuilder struct {
 // Build converts normalized collector facts into a queryable graph. Malformed
 // or incomplete facts are diagnosed and retained instead of aborting the build.
 func Build(facts []model.Fact) (*Graph, []Diagnostic) {
-	ordered := append([]model.Fact(nil), facts...)
-	sort.Slice(ordered, func(i, j int) bool { return factSortKey(ordered[i]) < factSortKey(ordered[j]) })
+	original := append([]model.Fact(nil), facts...)
+	sort.Slice(original, func(i, j int) bool { return factSortKey(original[i]) < factSortKey(original[j]) })
+	ordered, systemdDiagnostics := systemdcollect.ReconcileFacts(original)
+	ordered = reconcileProcessFacts(ordered)
 	b := &graphBuilder{
-		graph: New(), unitByName: make(map[string][]model.NodeRef), processByPID: make(map[int]model.NodeRef),
+		graph: New(), unitByName: make(map[string][]model.NodeRef), unitByKey: make(map[string]model.NodeRef), processByPID: make(map[int][]model.NodeRef), processByKey: make(map[string]model.NodeRef),
 		pathRefs: make(map[string][]model.NodeRef), stats: make(map[string][]pathcollect.StatObservation),
 		acls: make(map[string]pathcollect.ACLObservation), unitExecVars: make(map[string][]string),
 		unitSimpleExec: make(map[string]bool),
 	}
-	b.graph.setFacts(ordered)
+	b.graph.setFacts(original)
+	for _, diagnostic := range systemdDiagnostics {
+		b.diagnostics = append(b.diagnostics, Diagnostic{Code: diagnostic.Code, Message: diagnostic.Message, EvidenceIDs: uniqueSorted(diagnostic.EvidenceIDs)})
+	}
 
 	// Context and filesystem observations are prerequisites for control edges.
 	for _, fact := range ordered {
@@ -62,6 +69,7 @@ func Build(facts []model.Fact) (*Graph, []Diagnostic) {
 		}
 	}
 	b.addProcessParents(ordered)
+	b.addSystemdProcessManagement(ordered)
 	// Exec facts first provide the environment-use context needed by unit facts.
 	for _, fact := range ordered {
 		if fact.Kind == "systemd_exec" {
@@ -159,7 +167,8 @@ func (b *graphBuilder) addProcess(fact model.Fact) {
 	if ref.ID == "" {
 		return
 	}
-	b.processByPID[value.PID] = ref
+	b.processByPID[value.PID] = appendUniqueRefs(b.processByPID[value.PID], ref)
+	b.processByKey[processIdentityKey(value.PID, value.StartTime)] = ref
 	principal := model.Principal{UID: effectiveID(value.UIDs), GID: effectiveID(value.GIDs)}
 	target := b.ensurePrincipal(fact, principal, evidence, confidence)
 	b.addEdge(fact, EdgeSpec{Kind: model.EdgeRunsAs, From: ref, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence})
@@ -180,12 +189,50 @@ func (b *graphBuilder) addProcessParents(facts []model.Fact) {
 		if !b.decode(fact, &value) || value.PPID <= 0 {
 			continue
 		}
-		child, childOK := b.processByPID[value.PID]
-		parent, parentOK := b.processByPID[value.PPID]
+		child, childOK := b.uniqueProcess(value.PID)
+		parent, parentOK := b.uniqueProcess(value.PPID)
 		if childOK && parentOK {
 			b.addEdge(fact, EdgeSpec{Kind: model.EdgeSpawnedBy, From: child, To: parent, SourceCollector: fact.SourceCollector,
 				EvidenceIDs: mergeStrings(fact.EvidenceIDs, value.EvidenceIDs), Confidence: factConfidence(fact, value.Confidence)})
 		}
+	}
+}
+
+func (b *graphBuilder) addSystemdProcessManagement(facts []model.Fact) {
+	for _, fact := range facts {
+		if fact.Kind != "systemd_unit" {
+			continue
+		}
+		var value systemdcollect.UnitFact
+		if !b.decode(fact, &value) || value.Name == "" || value.MainPID <= 0 {
+			continue
+		}
+		process, processOK := b.uniqueProcess(value.MainPID)
+		unit, unitOK := b.unitByKey[systemdUnitKey(value)]
+		if len(b.processByPID[value.MainPID]) > 1 {
+			b.diagnose("ambiguous-process", fmt.Sprintf("PID %d refers to multiple observed process instances", value.MainPID), fact)
+			continue
+		}
+		if !processOK || !unitOK {
+			// A process may exit between the systemd and /proc snapshots. Preserve
+			// the observed unit without guessing which process replaced it.
+			continue
+		}
+		processNode, _ := b.graph.Node(process)
+		var processValue processcollect.ProcessFact
+		_ = json.Unmarshal(processNode.Attributes, &processValue)
+		if value.ControlGroup != "" && len(processValue.Cgroups) > 0 && !compatibleControlGroup(value.ControlGroup, processValue.Cgroups) {
+			b.diagnose("cgroup-mismatch", fmt.Sprintf("PID %d cgroup does not match unit %s", value.MainPID, value.Name), fact)
+			continue
+		}
+		evidence := mergeStrings(mergeStrings(fact.EvidenceIDs, value.EvidenceIDs), processNode.EvidenceIDs)
+		confidence := weakerConfidence(factConfidence(fact, value.Confidence), processNode.Confidence)
+		b.addEdge(fact, EdgeSpec{
+			Kind: model.EdgeManagedBy, From: process, To: unit,
+			SourceCollector: mergeSources(fact.SourceCollector, processNode.SourceCollector),
+			EvidenceIDs:     evidence, Confidence: confidence,
+			Attributes: marshalAttributes(map[string]any{"main_pid": value.MainPID, "manager": systemdManager(value)}),
+		})
 	}
 }
 
@@ -194,9 +241,23 @@ func (b *graphBuilder) addProcessDependencies(fact model.Fact) {
 	if !b.decode(fact, &value) {
 		return
 	}
-	process, ok := b.processByPID[value.PID]
+	var process model.NodeRef
+	var ok bool
+	if value.StartTime > 0 {
+		process, ok = b.processByKey[processIdentityKey(value.PID, value.StartTime)]
+		if !ok && len(b.processByPID[value.PID]) > 0 {
+			b.diagnose("stale-process-identity", fmt.Sprintf("process %d start time %d no longer matches", value.PID, value.StartTime), fact)
+			return
+		}
+	} else {
+		process, ok = b.uniqueProcess(value.PID)
+	}
 	if !ok {
-		b.diagnose("unresolved-consumer", fmt.Sprintf("process %d was not observed", value.PID), fact)
+		if len(b.processByPID[value.PID]) > 1 {
+			b.diagnose("ambiguous-process", fmt.Sprintf("PID %d refers to multiple observed process instances", value.PID), fact)
+		} else {
+			b.diagnose("unresolved-consumer", fmt.Sprintf("process %d was not observed", value.PID), fact)
+		}
 		return
 	}
 	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
@@ -217,18 +278,15 @@ func (b *graphBuilder) addSystemdUnit(fact model.Fact) {
 	if !b.decode(fact, &value) || value.Name == "" {
 		return
 	}
-	manager := value.Manager
-	if manager == "" {
-		manager = "system"
-	}
 	confidence := factConfidence(fact, value.Confidence)
 	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
-	key := fmt.Sprintf("%s:%d:%s", manager, value.ManagerUID, value.Name)
+	key := systemdUnitKey(value)
 	ref := b.addNode(fact, NodeSpec{Key: key, Kind: model.NodeUnit, Label: value.Name, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence, Attributes: marshalAttributes(value)})
 	if ref.ID == "" {
 		return
 	}
 	b.unitByName[value.Name] = appendUniqueRefs(b.unitByName[value.Name], ref)
+	b.unitByKey[key] = ref
 	var target model.NodeRef
 	if value.User != "" && value.User != "root" && value.UID == 0 {
 		target = b.namedPrincipal(fact, value.User, evidence, model.ConfidenceLow)
@@ -245,7 +303,7 @@ func (b *graphBuilder) addSystemdExec(fact model.Fact) {
 	if !b.decode(fact, &value) || value.Command.Executable == "" {
 		return
 	}
-	unit, ok := b.unit(fact, value.UnitName)
+	unit, ok := b.unit(fact, value.Manager, value.ManagerUID, value.UnitName)
 	if !ok {
 		return
 	}
@@ -256,10 +314,11 @@ func (b *graphBuilder) addSystemdExec(fact model.Fact) {
 	b.addEdge(fact, EdgeSpec{Kind: model.EdgeExecutes, From: unit, To: executable, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
 		Attributes: marshalAttributes(map[string]any{"directive": value.Directive, "index": value.Index, "simple": value.Command.SimpleExecutable, "resolved": resolved, "valid": value.Command.Valid})})
 	if value.Command.SimpleExecutable {
-		b.unitSimpleExec[value.UnitName] = true
+		b.unitSimpleExec[systemdFactKey(value.Manager, value.ManagerUID, value.UnitName)] = true
 	}
 	for _, reference := range value.Command.EnvironmentReferences {
-		b.unitExecVars[value.UnitName] = append(b.unitExecVars[value.UnitName], reference.Name)
+		key := systemdFactKey(value.Manager, value.ManagerUID, value.UnitName)
+		b.unitExecVars[key] = append(b.unitExecVars[key], reference.Name)
 	}
 }
 
@@ -268,7 +327,7 @@ func (b *graphBuilder) addSystemdSource(fact model.Fact) {
 	if !b.decode(fact, &value) || value.Path == "" {
 		return
 	}
-	unit, ok := b.unit(fact, value.UnitName)
+	unit, ok := b.unit(fact, value.Manager, value.ManagerUID, value.UnitName)
 	if !ok {
 		return
 	}
@@ -286,16 +345,17 @@ func (b *graphBuilder) addSystemdActivation(fact model.Fact) {
 	}
 	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
 	confidence := factConfidence(fact, value.Confidence)
-	target, ok := b.unit(fact, value.TargetUnit)
+	target, ok := b.unit(fact, value.Manager, value.ManagerUID, value.TargetUnit)
 	if !ok {
 		// A trigger may legitimately target a unit omitted from a partial
 		// inventory. Preserve the relationship but lower confidence.
-		target = b.addNode(fact, NodeSpec{Key: "system:0:" + value.TargetUnit, Kind: model.NodeUnit, Label: value.TargetUnit,
+		target = b.addNode(fact, NodeSpec{Key: systemdFactKey(value.Manager, value.ManagerUID, value.TargetUnit), Kind: model.NodeUnit, Label: value.TargetUnit,
 			SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: model.ConfidenceLow,
-			Attributes: marshalAttributes(map[string]any{"name": value.TargetUnit, "inventory_missing": true})})
+			Attributes: marshalAttributes(map[string]any{"name": value.TargetUnit, "manager": systemdFactManager(value.Manager), "manager_uid": value.ManagerUID, "inventory_missing": true})})
 		b.unitByName[value.TargetUnit] = appendUniqueRefs(b.unitByName[value.TargetUnit], target)
+		b.unitByKey[systemdFactKey(value.Manager, value.ManagerUID, value.TargetUnit)] = target
 	}
-	trigger := b.addNode(fact, NodeSpec{Key: value.Kind + ":" + value.TriggerUnit, Kind: model.NodeTrigger, Label: value.TriggerUnit,
+	trigger := b.addNode(fact, NodeSpec{Key: systemdFactKey(value.Manager, value.ManagerUID, value.Kind+":"+value.TriggerUnit), Kind: model.NodeTrigger, Label: value.TriggerUnit,
 		SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
 		Attributes: marshalAttributes(map[string]any{"kind": value.Kind, "schedule": value.Schedule})})
 	b.addEdge(fact, EdgeSpec{Kind: model.EdgeActivates, From: trigger, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
@@ -307,14 +367,15 @@ func (b *graphBuilder) addSystemdPaths(fact model.Fact) {
 	if !b.decode(fact, &value) || value.Name == "" {
 		return
 	}
-	unit, ok := b.unit(fact, value.Name)
+	unit, ok := b.unit(fact, value.Manager, value.ManagerUID, value.Name)
 	if !ok {
 		return
 	}
 	evidence := mergeStrings(fact.EvidenceIDs, value.EvidenceIDs)
 	confidence := factConfidence(fact, value.Confidence)
-	variables := uniqueSorted(b.unitExecVars[value.Name])
-	if b.unitSimpleExec[value.Name] {
+	key := systemdFactKey(value.Manager, value.ManagerUID, value.Name)
+	variables := uniqueSorted(b.unitExecVars[key])
+	if b.unitSimpleExec[key] {
 		variables = mergeStrings(variables, []string{"PATH"})
 	}
 	for _, target := range uniqueSorted(value.EnvironmentFiles) {
@@ -441,14 +502,14 @@ func (b *graphBuilder) addDelegation(fact model.Fact) {
 	confidence := factConfidence(fact, value.Confidence)
 	command := b.addNode(fact, NodeSpec{Key: "sudo:" + value.Command, Kind: model.NodeExecutable, Label: value.Command,
 		SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
-		Attributes: marshalAttributes(map[string]any{"delegated_command": true, "command": value.Command, "source_kind": value.SourceKind, "source_path": value.SourcePath})})
+		Attributes: marshalAttributes(map[string]any{"delegated_command": true, "command": value.Command, "source_kind": value.SourceKind, "source_path": value.SourcePath, "negated": value.Negated, "semantics_resolved": value.SemanticsResolved})})
 	target := b.namedPrincipal(fact, value.RunAs, evidence, confidence)
 	if target.ID != "" {
 		b.addEdge(fact, EdgeSpec{Kind: model.EdgeRunsAs, From: command, To: target, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence})
 	}
 	policyConfirmed := value.SourceKind == "sudo-list"
 	b.addEdge(fact, EdgeSpec{Kind: model.EdgeCanExecute, From: current, To: command, SourceCollector: fact.SourceCollector, EvidenceIDs: evidence, Confidence: confidence,
-		Attributes: marshalAttributes(map[string]any{"delegation": true, "policy_confirmed": policyConfirmed, "no_password": value.NoPassword, "reachable": true, "subject": value.Subject})})
+		Attributes: marshalAttributes(map[string]any{"delegation": true, "policy_confirmed": policyConfirmed, "no_password": value.NoPassword, "negated": value.Negated, "semantics_resolved": value.SemanticsResolved, "reachable": true, "subject": value.Subject})})
 }
 
 func (b *graphBuilder) addAdminSocket(fact model.Fact) {
@@ -571,17 +632,37 @@ func (b *graphBuilder) namedPrincipal(fact model.Fact, name string, evidence []s
 		Attributes: marshalAttributes(map[string]any{"name": name, "resolved": false})})
 }
 
-func (b *graphBuilder) unit(fact model.Fact, name string) (model.NodeRef, bool) {
-	refs := append([]model.NodeRef(nil), b.unitByName[name]...)
-	if len(refs) == 0 {
-		b.diagnose("unresolved-consumer", "systemd unit was not observed: "+name, fact)
+func (b *graphBuilder) unit(fact model.Fact, manager string, managerUID int, name string) (model.NodeRef, bool) {
+	key := systemdFactKey(manager, managerUID, name)
+	ref, ok := b.unitByKey[key]
+	if !ok {
+		b.diagnose("unresolved-consumer", "scoped systemd unit was not observed: "+key, fact)
 		return model.NodeRef{}, false
 	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].ID < refs[j].ID })
-	if len(refs) > 1 {
-		b.diagnose("ambiguous-unit", "multiple manager instances match "+name, fact)
+	return ref, true
+}
+
+func (b *graphBuilder) uniqueProcess(pid int) (model.NodeRef, bool) {
+	refs := b.processByPID[pid]
+	if len(refs) != 1 {
+		return model.NodeRef{}, false
 	}
 	return refs[0], true
+}
+
+func processIdentityKey(pid int, startTime uint64) string {
+	return fmt.Sprintf("%d:%d", pid, startTime)
+}
+
+func compatibleControlGroup(unit string, groups []processcollect.CgroupFact) bool {
+	unit = filepath.Clean("/" + strings.TrimPrefix(unit, "/"))
+	for _, group := range groups {
+		path := filepath.Clean("/" + strings.TrimPrefix(group.Path, "/"))
+		if path == unit || strings.HasPrefix(path, unit+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *graphBuilder) addNode(fact model.Fact, spec NodeSpec) model.NodeRef {
@@ -633,6 +714,28 @@ func principalFromIdentity(value contextcollect.IdentityFact) model.Principal {
 func effectiveID(values [4]int) int { return values[1] }
 
 func principalKey(uid int) string { return fmt.Sprintf("uid:%d", uid) }
+
+func systemdManager(value systemdcollect.UnitFact) string {
+	if value.Manager == "" {
+		return "system"
+	}
+	return value.Manager
+}
+
+func systemdUnitKey(value systemdcollect.UnitFact) string {
+	return systemdFactKey(value.Manager, value.ManagerUID, value.Name)
+}
+
+func systemdFactManager(manager string) string {
+	if manager == "" {
+		return "system"
+	}
+	return manager
+}
+
+func systemdFactKey(manager string, managerUID int, name string) string {
+	return fmt.Sprintf("%s:%d:%s", systemdFactManager(manager), managerUID, name)
+}
 
 func factConfidence(fact model.Fact, embedded model.Confidence) model.Confidence {
 	if embedded == "" {

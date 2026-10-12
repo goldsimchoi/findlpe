@@ -64,6 +64,9 @@ func TestExecTimeoutAndCancellation(t *testing.T) {
 		if result.Status != model.ProbeTimeout || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("timeout result = (%#v, %v)", result, err)
 		}
+		if string(result.Stdout) != "early" {
+			t.Fatalf("timeout discarded partial stdout: %#v", result)
+		}
 	})
 
 	t.Run("cancel", func(t *testing.T) {
@@ -81,7 +84,7 @@ func TestExecTimeoutAndCancellation(t *testing.T) {
 	})
 }
 
-func TestSSHAdapterContract(t *testing.T) {
+func TestBuiltinAdaptersSatisfyContract(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
 	contracttest.Run(t, func(t *testing.T) (adapter.Adapter, adapter.ExecRequest, []byte) {
 		server := passwordServer(t)

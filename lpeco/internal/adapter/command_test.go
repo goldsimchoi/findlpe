@@ -50,3 +50,14 @@ func TestRenderPOSIXRejectsNUL(t *testing.T) {
 		}
 	}
 }
+
+func TestRetryableExecutionErrorPreservesCause(t *testing.T) {
+	cause := errors.New("temporary command failure")
+	marked := MarkRetryable(cause)
+	if !IsRetryable(marked) || !errors.Is(marked, cause) {
+		t.Fatalf("retryable error = %v", marked)
+	}
+	if IsRetryable(cause) || MarkRetryable(nil) != nil {
+		t.Fatal("unmarked or nil error reported as retryable")
+	}
+}

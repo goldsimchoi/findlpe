@@ -160,7 +160,7 @@ func (a *Adapter) Exec(ctx context.Context, request adapter.ExecRequest) (adapte
 		} else {
 			result.Status = model.ProbePartial
 		}
-		return result, execContext.Err()
+		return result, adapter.MarkRetryable(execContext.Err())
 	case runErr := <-completed:
 		result.Stdout, result.Stderr, result.Truncated = outputs.snapshot()
 		result.FinishedAt = time.Now().UTC()
@@ -169,7 +169,7 @@ func (a *Adapter) Exec(ctx context.Context, request adapter.ExecRequest) (adapte
 			var exitError *cryptossh.ExitError
 			if !errors.As(runErr, &exitError) {
 				result.Status = model.ProbePartial
-				return result, fmt.Errorf("run SSH command: %w", runErr)
+				return result, adapter.MarkRetryable(fmt.Errorf("run SSH command: %w", runErr))
 			}
 			exitCode = exitError.ExitStatus()
 		}

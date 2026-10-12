@@ -42,6 +42,8 @@ type UnitFact struct {
 	RootImage        string           `json:"root_image"`
 	SourcePaths      []string         `json:"source_paths"`
 	InventoryOnly    bool             `json:"inventory_only"`
+	RuntimeObserved  bool             `json:"runtime_observed"`
+	FilesObserved    bool             `json:"files_observed"`
 	MissingFacts     []string         `json:"missing_facts"`
 	EvidenceIDs      []string         `json:"evidence_ids"`
 	Confidence       model.Confidence `json:"confidence"`
@@ -49,6 +51,8 @@ type UnitFact struct {
 
 type UnitSourceFact struct {
 	UnitName    string           `json:"unit_name"`
+	Manager     string           `json:"manager"`
+	ManagerUID  int              `json:"manager_uid"`
 	Path        string           `json:"path"`
 	Kind        string           `json:"kind"`
 	Applied     bool             `json:"applied"`
@@ -57,19 +61,25 @@ type UnitSourceFact struct {
 }
 
 type ExecFact struct {
-	UnitName     string                  `json:"unit_name"`
-	Directive    string                  `json:"directive"`
-	Index        int                     `json:"index"`
-	Command      systemdunit.ExecCommand `json:"command"`
-	Source       systemdunit.SourceRef   `json:"source"`
-	MissingFacts []string                `json:"missing_facts"`
-	EvidenceIDs  []string                `json:"evidence_ids"`
-	Confidence   model.Confidence        `json:"confidence"`
+	UnitName        string                  `json:"unit_name"`
+	Manager         string                  `json:"manager"`
+	ManagerUID      int                     `json:"manager_uid"`
+	Directive       string                  `json:"directive"`
+	Index           int                     `json:"index"`
+	Command         systemdunit.ExecCommand `json:"command"`
+	Source          systemdunit.SourceRef   `json:"source"`
+	MissingFacts    []string                `json:"missing_facts"`
+	RuntimeObserved bool                    `json:"runtime_observed"`
+	FileObserved    bool                    `json:"file_observed"`
+	EvidenceIDs     []string                `json:"evidence_ids"`
+	Confidence      model.Confidence        `json:"confidence"`
 }
 
 type ActivationFact struct {
 	TriggerUnit string           `json:"trigger_unit"`
 	TargetUnit  string           `json:"target_unit"`
+	Manager     string           `json:"manager"`
+	ManagerUID  int              `json:"manager_uid"`
 	Kind        string           `json:"kind"`
 	Active      bool             `json:"active"`
 	Automatic   bool             `json:"automatic"`
@@ -80,10 +90,14 @@ type ActivationFact struct {
 
 type UnitSecurityFact struct {
 	UnitName              string           `json:"unit_name"`
+	Manager               string           `json:"manager"`
+	ManagerUID            int              `json:"manager_uid"`
 	DynamicUser           bool             `json:"dynamic_user"`
 	NoNewPrivileges       bool             `json:"no_new_privileges"`
 	CapabilityBoundingSet []string         `json:"capability_bounding_set"`
 	AmbientCapabilities   []string         `json:"ambient_capabilities"`
+	RuntimeObserved       bool             `json:"runtime_observed"`
+	FilesObserved         bool             `json:"files_observed"`
 	EvidenceIDs           []string         `json:"evidence_ids"`
 	Confidence            model.Confidence `json:"confidence"`
 }
@@ -114,7 +128,8 @@ func Normalize(runtimeUnits []RuntimeUnit, documentSets map[string][]DocumentSet
 	}
 	sort.Strings(orderedNames)
 	for _, name := range orderedNames {
-		runtime, hasRuntime := runtimeByName[name]
+		runtime, hasObservation := runtimeByName[name]
+		hasRuntime := hasObservation && !runtime.FileInventory
 		sets := documentSets[name]
 		var documents []systemdunit.Document
 		completeFiles := false
@@ -125,6 +140,19 @@ func Normalize(runtimeUnits []RuntimeUnit, documentSets map[string][]DocumentSet
 		context := systemdunit.LoadContext{UnitName: name, Aliases: aliasesWithoutName(runtime.Names, name)}
 		effective := systemdunit.Merge(context, documents)
 		unit := makeUnitFact(name, runtime, hasRuntime, effective, currentUID)
+		if hasObservation && runtime.FileInventory {
+			unit.Manager = runtime.Manager
+			unit.ManagerUID = runtime.ManagerUID
+			unit.FilesObserved = true
+			unit.EvidenceIDs = appendUnique(unit.EvidenceIDs, runtime.EvidenceIDs...)
+			if runtime.FragmentPath != "" {
+				unit.SourcePaths = appendUnique(unit.SourcePaths, runtime.FragmentPath)
+			}
+			if unit.Manager == "user" && unit.ManagerUID >= 0 {
+				unit.UID = unit.ManagerUID
+				unit.InventoryOnly = true
+			}
+		}
 		result.Units = append(result.Units, unit)
 		appliedSources := make(map[string]bool, len(effective.Sources))
 		for _, path := range effective.Sources {
@@ -140,14 +168,14 @@ func Normalize(runtimeUnits []RuntimeUnit, documentSets map[string][]DocumentSet
 				confidence = model.ConfidenceMedium
 			}
 			result.Sources = append(result.Sources, UnitSourceFact{
-				UnitName: name, Path: document.Source.Path, Kind: kind, Applied: appliedSources[document.Source.Path],
+				UnitName: name, Manager: unit.Manager, ManagerUID: unit.ManagerUID, Path: document.Source.Path, Kind: kind, Applied: appliedSources[document.Source.Path],
 				EvidenceIDs: evidenceFromDocument(document), Confidence: confidence,
 			})
 		}
-		execs, diagnostics := normalizeExecs(name, runtime, hasRuntime, effective, unit.EvidenceIDs)
+		execs, diagnostics := normalizeExecs(name, unit.Manager, unit.ManagerUID, runtime, hasRuntime, effective, unit.EvidenceIDs)
 		result.Execs = append(result.Execs, execs...)
 		result.Diagnostics = append(result.Diagnostics, diagnostics...)
-		result.Security = append(result.Security, normalizeSecurity(name, runtime, hasRuntime, effective, unit.EvidenceIDs))
+		result.Security = append(result.Security, normalizeSecurity(name, unit.Manager, unit.ManagerUID, runtime, hasRuntime, effective, unit.EvidenceIDs))
 	}
 	for _, runtime := range runtimeUnits {
 		if activation, ok := normalizeActivation(runtime); ok {
@@ -164,7 +192,7 @@ func Normalize(runtimeUnits []RuntimeUnit, documentSets map[string][]DocumentSet
 }
 
 func makeUnitFact(name string, runtime RuntimeUnit, hasRuntime bool, effective systemdunit.EffectiveUnit, currentUID int) UnitFact {
-	unit := UnitFact{Name: name, Confidence: model.ConfidenceHigh}
+	unit := UnitFact{Name: name, Confidence: model.ConfidenceHigh, RuntimeObserved: hasRuntime, FilesObserved: len(effective.Sources) > 0}
 	if hasRuntime {
 		unit.Aliases = aliasesWithoutName(runtime.Names, name)
 		unit.Manager = runtime.Manager
@@ -189,6 +217,10 @@ func makeUnitFact(name string, runtime RuntimeUnit, hasRuntime bool, effective s
 		unit.MissingFacts = append(unit.MissingFacts, runtime.MissingFacts...)
 		unit.EvidenceIDs = append(unit.EvidenceIDs, runtime.EvidenceIDs...)
 		unit.InventoryOnly = runtime.Manager == "user" && (runtime.ManagerUID == currentUID || runtime.UID == currentUID)
+		if runtime.Manager == "user" && runtime.ManagerUID >= 0 {
+			unit.UID = runtime.ManagerUID
+			unit.InventoryOnly = true
+		}
 		if len(runtime.MissingFacts) > 0 {
 			unit.Confidence = model.ConfidenceMedium
 		}
@@ -234,7 +266,7 @@ func makeUnitFact(name string, runtime RuntimeUnit, hasRuntime bool, effective s
 	return unit
 }
 
-func normalizeExecs(name string, runtime RuntimeUnit, hasRuntime bool, effective systemdunit.EffectiveUnit, unitEvidence []string) ([]ExecFact, []CollectorDiagnostic) {
+func normalizeExecs(name, manager string, managerUID int, runtime RuntimeUnit, hasRuntime bool, effective systemdunit.EffectiveUnit, unitEvidence []string) ([]ExecFact, []CollectorDiagnostic) {
 	var facts []ExecFact
 	var diagnostics []CollectorDiagnostic
 	usedRuntime := make(map[string]bool)
@@ -248,8 +280,10 @@ func normalizeExecs(name string, runtime RuntimeUnit, hasRuntime bool, effective
 				confidence = model.ConfidenceMedium
 				missing = append(missing, "runtime command unavailable")
 			}
-			if runtimeCommand, ok := runtime.RuntimeExec[directive]; ok && index == 0 {
+			runtimeObserved := false
+			if runtimeCommand, ok := runtime.RuntimeExec[directive]; ok && index == 0 && hasRuntime {
 				usedRuntime[directive] = true
+				runtimeObserved = true
 				if command.Executable != runtimeCommand.Executable || !equalStrings(command.Arguments, runtimeCommand.Arguments) {
 					diagnostics = append(diagnostics, CollectorDiagnostic{Code: "runtime-file-mismatch", Message: directive + " differs between manager and files", UnitName: name, EvidenceIDs: appendUnique(runtime.EvidenceIDs, value.Source.EvidenceID)})
 				}
@@ -260,7 +294,8 @@ func normalizeExecs(name string, runtime RuntimeUnit, hasRuntime bool, effective
 				missing = append(missing, "command semantics incomplete")
 			}
 			facts = append(facts, ExecFact{
-				UnitName: name, Directive: directive, Index: index, Command: command, Source: value.Source,
+				UnitName: name, Manager: manager, ManagerUID: managerUID, Directive: directive, Index: index, Command: command, Source: value.Source,
+				RuntimeObserved: runtimeObserved, FileObserved: true,
 				MissingFacts: missing, EvidenceIDs: compactNonEmpty(appendUnique(runtime.EvidenceIDs, value.Source.EvidenceID)), Confidence: confidence,
 			})
 		}
@@ -270,16 +305,17 @@ func normalizeExecs(name string, runtime RuntimeUnit, hasRuntime bool, effective
 			continue
 		}
 		facts = append(facts, ExecFact{
-			UnitName: name, Directive: directive, Command: runtimeCommand,
-			Source:       systemdunit.SourceRef{Path: runtime.FragmentPath, EvidenceID: first(runtime.EvidenceIDs)},
-			MissingFacts: []string{"file provenance unavailable"}, EvidenceIDs: append([]string(nil), unitEvidence...), Confidence: model.ConfidenceMedium,
+			UnitName: name, Manager: manager, ManagerUID: managerUID, Directive: directive, Command: runtimeCommand,
+			RuntimeObserved: true,
+			Source:          systemdunit.SourceRef{Path: runtime.FragmentPath, EvidenceID: first(runtime.EvidenceIDs)},
+			MissingFacts:    []string{"file provenance unavailable"}, EvidenceIDs: append([]string(nil), unitEvidence...), Confidence: model.ConfidenceMedium,
 		})
 	}
 	return facts, diagnostics
 }
 
-func normalizeSecurity(name string, runtime RuntimeUnit, hasRuntime bool, effective systemdunit.EffectiveUnit, evidence []string) UnitSecurityFact {
-	security := UnitSecurityFact{UnitName: name, EvidenceIDs: append([]string(nil), evidence...), Confidence: model.ConfidenceHigh}
+func normalizeSecurity(name, manager string, managerUID int, runtime RuntimeUnit, hasRuntime bool, effective systemdunit.EffectiveUnit, evidence []string) UnitSecurityFact {
+	security := UnitSecurityFact{UnitName: name, Manager: manager, ManagerUID: managerUID, RuntimeObserved: hasRuntime, FilesObserved: len(effective.Sources) > 0, EvidenceIDs: append([]string(nil), evidence...), Confidence: model.ConfidenceHigh}
 	if hasRuntime {
 		security.DynamicUser = runtime.DynamicUser
 		security.NoNewPrivileges = runtime.NoNewPrivileges
@@ -322,7 +358,7 @@ func normalizeActivation(runtime RuntimeUnit) (ActivationFact, bool) {
 		confidence = model.ConfidenceMedium
 	}
 	return ActivationFact{
-		TriggerUnit: runtime.Name, TargetUnit: target, Kind: kind, Active: active, Automatic: active,
+		TriggerUnit: runtime.Name, TargetUnit: target, Manager: runtime.Manager, ManagerUID: runtime.ManagerUID, Kind: kind, Active: active, Automatic: active,
 		Schedule: runtime.NextElapse, EvidenceIDs: append([]string(nil), runtime.EvidenceIDs...), Confidence: confidence,
 	}, true
 }
@@ -367,6 +403,23 @@ func Facts(normalized Normalized) ([]model.Fact, error) {
 		if err := appendFacts(kind, values); err != nil {
 			return nil, err
 		}
+	}
+	for _, diagnostic := range normalized.Diagnostics {
+		if len(diagnostic.EvidenceIDs) == 0 {
+			continue
+		}
+		data, err := json.Marshal(diagnostic)
+		if err != nil {
+			return nil, err
+		}
+		id, err := model.StableID("fact", struct {
+			Kind string
+			Data json.RawMessage
+		}{"systemd_diagnostic", data})
+		if err != nil {
+			return nil, err
+		}
+		facts = append(facts, model.Fact{ID: id, Kind: "systemd_diagnostic", SourceCollector: "systemd", EvidenceIDs: diagnostic.EvidenceIDs, Confidence: model.ConfidenceLow, Data: data})
 	}
 	sort.Slice(facts, func(i, j int) bool { return facts[i].ID < facts[j].ID })
 	return facts, nil

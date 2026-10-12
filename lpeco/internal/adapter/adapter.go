@@ -14,6 +14,25 @@ var (
 	ErrInvalidCommand  = errors.New("invalid command")
 )
 
+type retryableExecutionError struct{ err error }
+
+func (e retryableExecutionError) Error() string { return e.err.Error() }
+func (e retryableExecutionError) Unwrap() error { return e.err }
+
+// MarkRetryable records that an execution error is scoped to one command and
+// that the already-open adapter can safely make one more idempotent attempt.
+func MarkRetryable(err error) error {
+	if err == nil || IsRetryable(err) {
+		return err
+	}
+	return retryableExecutionError{err: err}
+}
+
+func IsRetryable(err error) bool {
+	var marked retryableExecutionError
+	return errors.As(err, &marked)
+}
+
 type Capabilities struct {
 	ProtocolVersion    string `json:"protocol_version"`
 	TransportKind      string `json:"transport_kind"`
