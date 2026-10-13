@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/normalone/lpeco/internal/adapter"
 	"github.com/normalone/lpeco/internal/collect"
 	contextcollect "github.com/normalone/lpeco/internal/collect/context"
+	packagecollect "github.com/normalone/lpeco/internal/collect/packageinfo"
 	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	processcollect "github.com/normalone/lpeco/internal/collect/process"
 	graphpkg "github.com/normalone/lpeco/internal/graph"
@@ -23,6 +25,7 @@ import (
 	"github.com/normalone/lpeco/internal/probe"
 	"github.com/normalone/lpeco/internal/rules"
 	storepkg "github.com/normalone/lpeco/internal/store"
+	"github.com/normalone/lpeco/internal/vulndb"
 )
 
 func TestDefaultCollectorsRegisterPackageInfoAfterBinary(t *testing.T) {
@@ -34,6 +37,110 @@ func TestDefaultCollectorsRegisterPackageInfoAfterBinary(t *testing.T) {
 	want := []string{"context", "process", "systemd", "path", "scheduler", "binary", "packageinfo", "container"}
 	if !reflect.DeepEqual(ids, want) {
 		t.Fatalf("default collector order = %#v, want %#v", ids, want)
+	}
+}
+
+func TestRunVulnerabilityModesAndTwoPassCollection(t *testing.T) {
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	snapshot := testVulnerabilitySnapshot(t, "CVE-2099-0001", now)
+	tests := []struct {
+		name              string
+		input             VulnerabilityInput
+		distribution      model.DistributionProfile
+		omitOwnership     int
+		wantStatus        model.VulnerabilityCoverageStatus
+		wantError         bool
+		wantPackageProbes bool
+		wantMatches       int
+	}{
+		{name: "off", input: VulnerabilityInput{Mode: model.VulnerabilityModeOff}, distribution: supportedDistribution(), wantStatus: model.VulnerabilityCoverageDisabled},
+		{name: "auto missing", input: VulnerabilityInput{Mode: model.VulnerabilityModeAuto}, distribution: supportedDistribution(), wantStatus: model.VulnerabilityCoverageNotRun},
+		{name: "required missing", input: VulnerabilityInput{Mode: model.VulnerabilityModeRequired}, distribution: supportedDistribution(), wantStatus: model.VulnerabilityCoverageIncomplete, wantError: true},
+		{name: "auto corrupt", input: VulnerabilityInput{Mode: model.VulnerabilityModeAuto, LoadError: errors.New("bad manifest")}, distribution: supportedDistribution(), wantStatus: model.VulnerabilityCoverageIncomplete, wantError: true},
+		{name: "auto unsupported", input: VulnerabilityInput{Mode: model.VulnerabilityModeAuto, Snapshot: &snapshot}, distribution: unsupportedDistribution(), wantStatus: model.VulnerabilityCoverageUnsupported},
+		{name: "required unsupported", input: VulnerabilityInput{Mode: model.VulnerabilityModeRequired, Snapshot: &snapshot}, distribution: unsupportedDistribution(), wantStatus: model.VulnerabilityCoverageUnsupported, wantError: true},
+		{name: "valid", input: VulnerabilityInput{Mode: model.VulnerabilityModeAuto, Snapshot: &snapshot}, distribution: supportedDistribution(), wantStatus: model.VulnerabilityCoverageComplete, wantPackageProbes: true, wantMatches: 1},
+		{name: "bounded omission", input: VulnerabilityInput{Mode: model.VulnerabilityModeAuto, Snapshot: &snapshot}, distribution: supportedDistribution(), omitOwnership: 1, wantStatus: model.VulnerabilityCoverageIncomplete, wantError: true, wantPackageProbes: true, wantMatches: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			packages := &testPackageCollector{omitOwnership: test.omitOwnership}
+			collectors := vulnerabilityTestCollectors(packages, test.distribution)
+			transport := newFakeAdapter(adapter.Capabilities{TransportKind: "raw", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+			result, err := Run(context.Background(), transport, newTestStore(t, "vulnerability-"+strings.ReplaceAll(test.name, " ", "-")), Options{
+				SessionID: "vulnerability-" + strings.ReplaceAll(test.name, " ", "-"), Collectors: collectors,
+				PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{}, Vulnerability: test.input, Now: func() time.Time { return now },
+			})
+			if (err != nil) != test.wantError {
+				t.Fatalf("Run error = %v, wantError %v", err, test.wantError)
+			}
+			if result.Vulnerability.Status != test.wantStatus {
+				t.Fatalf("coverage status = %q, want %q: %#v", result.Vulnerability.Status, test.wantStatus, result.Vulnerability)
+			}
+			if got := len(result.VulnerabilityMatches); got != test.wantMatches {
+				t.Fatalf("matches = %d, want %d: %#v", got, test.wantMatches, result.VulnerabilityMatches)
+			}
+			packageCalls := append(append([]string(nil), packages.ownershipPaths...), packages.metadataPackages...)
+			if (len(packageCalls) > 0) != test.wantPackageProbes {
+				t.Fatalf("package calls = %#v, want probes %v", packageCalls, test.wantPackageProbes)
+			}
+			if !containsPhase(result.Phases, PhaseKnownVulnerability) {
+				t.Fatalf("known-vulnerability phase missing from %#v", result.Phases)
+			}
+			if test.wantPackageProbes {
+				if !reflect.DeepEqual(packages.ownershipPaths, []string{"/opt/demo/bin"}) {
+					t.Fatalf("ownership paths = %#v", packages.ownershipPaths)
+				}
+				if !reflect.DeepEqual(packages.metadataPackages, []string{"demo:amd64"}) {
+					t.Fatalf("metadata packages = %#v", packages.metadataPackages)
+				}
+				if phaseIndex(result.Phases, PhaseKnownVulnerability) >= phaseIndex(result.Phases, PhaseFinalize) {
+					t.Fatalf("phase order = %#v", result.Phases)
+				}
+			}
+		})
+	}
+}
+
+func TestRunVulnerabilityStaleSnapshotWarnsButCompletes(t *testing.T) {
+	retrieved := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	now := retrieved.Add(vulndb.SnapshotStaleAfter + time.Hour)
+	snapshot := testVulnerabilitySnapshot(t, "CVE-2099-0002", retrieved)
+	packages := &testPackageCollector{}
+	result, err := Run(context.Background(), newFakeAdapter(adapter.Capabilities{TransportKind: "raw", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20}), newTestStore(t, "vulnerability-stale"), Options{
+		SessionID: "vulnerability-stale", Collectors: vulnerabilityTestCollectors(packages, supportedDistribution()), PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+		Vulnerability: VulnerabilityInput{Mode: model.VulnerabilityModeAuto, Snapshot: &snapshot}, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Vulnerability.Status != model.VulnerabilityCoverageComplete || !result.Vulnerability.Snapshot.Stale {
+		t.Fatalf("stale coverage = %#v", result.Vulnerability)
+	}
+	if !hasVulnerabilityCoverageDiagnostic(result.Vulnerability, "stale-vulnerability-snapshot") {
+		t.Fatalf("stale diagnostic missing: %#v", result.Vulnerability.Diagnostics)
+	}
+}
+
+func TestRunVulnerabilityFailureRetainsDeterministicCandidates(t *testing.T) {
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	snapshot := testVulnerabilitySnapshot(t, "CVE-2099-0003", now)
+	packages := &testPackageCollector{}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "raw", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	transport.errors["package.metadata"] = []error{context.DeadlineExceeded, context.DeadlineExceeded}
+	result, err := Run(context.Background(), transport, newTestStore(t, "vulnerability-retain"), Options{
+		SessionID: "vulnerability-retain", Collectors: vulnerabilityTestCollectors(packages, supportedDistribution()),
+		PrimaryRules: []rules.Rule{strongProcessRule{}}, Rules: []rules.Rule{strongProcessRule{}},
+		Vulnerability: VulnerabilityInput{Mode: model.VulnerabilityModeAuto, Snapshot: &snapshot}, Now: func() time.Time { return now },
+	})
+	if err == nil {
+		t.Fatal("Run succeeded, want partial error")
+	}
+	if result.Vulnerability.Status != model.VulnerabilityCoverageIncomplete {
+		t.Fatalf("coverage = %#v", result.Vulnerability)
+	}
+	if len(result.Candidates) != 1 || result.Candidates[0].RuleID != "test.strong-process" {
+		t.Fatalf("deterministic candidates = %#v", result.Candidates)
 	}
 }
 
@@ -61,7 +168,7 @@ func TestRunOrdersAdaptivePhasesAndExpandsOnlyReferencedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	wantPhases := []Phase{PhaseProfile, PhaseContext, PhasePrimary, PhaseTargetedValidation, PhaseFallback, PhaseFinalize}
+	wantPhases := []Phase{PhaseProfile, PhaseContext, PhasePrimary, PhaseTargetedValidation, PhaseFallback, PhaseKnownVulnerability, PhaseFinalize}
 	if !reflect.DeepEqual(result.Phases, wantPhases) {
 		t.Fatalf("phases = %#v, want %#v", result.Phases, wantPhases)
 	}
@@ -138,7 +245,7 @@ func TestRunSkipsFallbackForStrongPrimaryUnlessFull(t *testing.T) {
 				testCollector{id: "scheduler", plan: fixedPlan(testDefinition("scheduler.inventory", "scheduler", model.PassiveRead))},
 			}
 			transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", AsyncTasks: true, MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
-			_, err := Run(context.Background(), transport, newTestStore(t, "fallback-"+test.name), Options{
+			result, err := Run(context.Background(), transport, newTestStore(t, "fallback-"+test.name), Options{
 				SessionID: "fallback-" + test.name, Collectors: collectors, Full: test.full,
 				PrimaryRules: []rules.Rule{strongProcessRule{}}, Rules: []rules.Rule{strongProcessRule{}},
 			})
@@ -148,6 +255,9 @@ func TestRunSkipsFallbackForStrongPrimaryUnlessFull(t *testing.T) {
 			called := containsString(transport.probeCalls(), "scheduler.inventory")
 			if called != test.wantFallback {
 				t.Fatalf("fallback called = %v, want %v (%#v)", called, test.wantFallback, transport.probeCalls())
+			}
+			if !containsPhase(result.Phases, PhaseKnownVulnerability) {
+				t.Fatalf("known-vulnerability phase missing when fallback=%v: %#v", test.wantFallback, result.Phases)
 			}
 		})
 	}
@@ -556,6 +666,59 @@ type testCollector struct {
 	parse func(probe.Definition, adapter.ExecResult, string) ([]model.Fact, error)
 }
 
+type testPackageCollector struct {
+	omitOwnership    int
+	omitMetadata     int
+	ownershipPaths   []string
+	metadataPackages []string
+}
+
+func (*testPackageCollector) ID() string { return "packageinfo" }
+func (*testPackageCollector) Plan(model.HostProfile, collect.Discovery) []probe.Definition {
+	return nil
+}
+func (collector *testPackageCollector) PlanOwnership(_ model.HostProfile, paths []string, _ adapter.Capabilities) packagecollect.Plan {
+	collector.ownershipPaths = append(collector.ownershipPaths, paths...)
+	return packagecollect.Plan{Definitions: []probe.Definition{testDefinition("package.ownership", "packageinfo", model.PassiveRead)}, Requested: len(paths), Omitted: collector.omitOwnership}
+}
+func (collector *testPackageCollector) PlanMetadata(_ model.HostProfile, requests []packagecollect.Request, _ adapter.Capabilities) packagecollect.Plan {
+	for _, request := range requests {
+		collector.metadataPackages = append(collector.metadataPackages, request.Package)
+	}
+	return packagecollect.Plan{Definitions: []probe.Definition{testDefinition("package.metadata", "packageinfo", model.PassiveRead)}, Requested: len(requests), Omitted: collector.omitMetadata}
+}
+func (*testPackageCollector) Parse(definition probe.Definition, _ adapter.ExecResult, evidenceID string) ([]model.Fact, error) {
+	switch definition.ID {
+	case "package.ownership":
+		value := packagecollect.OwnershipFact{
+			Path: "/opt/demo/bin", Manager: "dpkg", Packages: []string{"demo:amd64"}, ObservedPackages: []string{"demo:amd64"}, Owned: true,
+			EvidenceIDs: []string{evidenceID}, Confidence: model.ConfidenceHigh,
+		}
+		return []model.Fact{testFact("package_ownership", "packageinfo", evidenceID, value)}, nil
+	case "package.metadata":
+		binaryVersion, _ := vulndb.ParseDebianVersion("1.0-1")
+		sourceVersion, _ := vulndb.ParseDebianVersion("1.0-1")
+		value := packagecollect.InstalledPackageFact{
+			RequestedPackage: "demo:amd64", Manager: "dpkg", Status: "install ok installed", BinaryPackage: "demo", Architecture: "amd64",
+			BinaryVersion: binaryVersion, SourcePackage: "demo-source", SourceVersion: sourceVersion,
+			EvidenceIDs: []string{evidenceID}, Confidence: model.ConfidenceHigh,
+		}
+		return []model.Fact{testFact("installed_package", "packageinfo", evidenceID, value)}, nil
+	default:
+		return nil, fmt.Errorf("unsupported test package definition %q", definition.ID)
+	}
+}
+
+func vulnerabilityTestCollectors(packages *testPackageCollector, distribution model.DistributionProfile) []collect.Collector {
+	return []collect.Collector{
+		testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: func(definition probe.Definition, result adapter.ExecResult, evidenceID string) ([]model.Fact, error) {
+			return vulnerabilityContextFacts(definition, result, evidenceID, distribution)
+		}},
+		testCollector{id: "process", plan: fixedPlan(testDefinition("process.snapshot", "process", model.PassiveRead)), parse: processFacts},
+		packages,
+	}
+}
+
 func (c testCollector) ID() string { return c.id }
 func (c testCollector) Plan(profile model.HostProfile, discovery collect.Discovery) []probe.Definition {
 	if c.plan == nil {
@@ -583,6 +746,82 @@ func contextFacts(_ probe.Definition, _ adapter.ExecResult, evidenceID string) (
 	identity := contextcollect.IdentityFact{UIDs: [4]int{1000, 1000, 1000, 1000}, GIDs: [4]int{1000, 1000, 1000, 1000}, Groups: []int{1000}}
 	host := contextcollect.HostFact{OS: "Linux", Architecture: "x86_64", InitSystem: "systemd", SystemdRunning: true, AvailableCommands: map[string]bool{"stat": true}}
 	return []model.Fact{testFact("identity", "context", evidenceID, identity), testFact("host", "context", evidenceID, host)}, nil
+}
+
+func vulnerabilityContextFacts(definition probe.Definition, result adapter.ExecResult, evidenceID string, distribution model.DistributionProfile) ([]model.Fact, error) {
+	facts, err := contextFacts(definition, result, evidenceID)
+	if err != nil {
+		return nil, err
+	}
+	distribution.EvidenceIDs = []string{evidenceID}
+	facts = append(facts, testFact("distribution", "context", evidenceID, distribution))
+	return facts, nil
+}
+
+func supportedDistribution() model.DistributionProfile {
+	return model.DistributionProfile{
+		ID: "ubuntu", VersionID: "22.04", VersionCodename: "jammy", Channel: "standard", PackageArchitecture: "amd64", Confidence: model.ConfidenceHigh,
+	}
+}
+
+func unsupportedDistribution() model.DistributionProfile {
+	return model.DistributionProfile{ID: "debian", VersionID: "12", Channel: "standard", PackageArchitecture: "amd64", Confidence: model.ConfidenceHigh}
+}
+
+func testVulnerabilitySnapshot(t *testing.T, cve string, retrievedAt time.Time) vulndb.Snapshot {
+	t.Helper()
+	policy, err := vulndb.LoadUbuntuReleasePolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations, _, err := vulndb.LoadImpactCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizer := vulndb.NewUbuntuNormalizer(policy, annotations)
+	document := fmt.Sprintf(`{
+		"schema_version":"1.7.0",
+		"id":"UBUNTU-%[1]s",
+		"upstream":["%[1]s"],
+		"modified":"2026-10-13T20:00:00Z",
+		"affected":[{
+			"package":{"ecosystem":"Ubuntu:22.04:LTS","name":"demo-source","purl":"pkg:deb/ubuntu/demo-source@1.0-2?arch=source&distro=jammy"},
+			"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0-2"}]}],
+			"versions":["1.0-1"],
+			"ecosystem_specific":{"binaries":[{"binary_name":"demo","binary_version":"1.0-2"}],"availability":"No subscription required"}
+		}],
+		"references":[{"type":"REPORT","url":"https://ubuntu.com/security/%[1]s"}]
+	}`, cve)
+	if err := normalizer.AddOSV(cve+".json", strings.NewReader(document)); err != nil {
+		t.Fatalf("AddOSV: %v", err)
+	}
+	snapshot, err := normalizer.Snapshot(retrievedAt, []vulndb.Source{{Kind: "osv", URL: "https://security-metadata.canonical.com/osv/osv-all.tar.xz"}})
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	return snapshot
+}
+
+func hasVulnerabilityCoverageDiagnostic(coverage model.VulnerabilityCoverage, code string) bool {
+	for _, diagnostic := range coverage.Diagnostics {
+		if diagnostic.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPhase(phases []Phase, wanted Phase) bool {
+	return phaseIndex(phases, wanted) >= 0
+}
+
+func phaseIndex(phases []Phase, wanted Phase) int {
+	for index, phase := range phases {
+		if phase == wanted {
+			return index
+		}
+	}
+	return -1
 }
 
 func processFacts(definition probe.Definition, _ adapter.ExecResult, evidenceID string) ([]model.Fact, error) {

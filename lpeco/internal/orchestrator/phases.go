@@ -26,6 +26,7 @@ const (
 	PhasePrimary            Phase = "primary"
 	PhaseTargetedValidation Phase = "targeted-validation"
 	PhaseFallback           Phase = "fallback"
+	PhaseKnownVulnerability Phase = "known-vulnerability"
 	PhaseFinalize           Phase = "finalize"
 )
 

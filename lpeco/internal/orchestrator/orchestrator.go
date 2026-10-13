@@ -19,7 +19,15 @@ import (
 	"github.com/normalone/lpeco/internal/probe"
 	"github.com/normalone/lpeco/internal/rules"
 	"github.com/normalone/lpeco/internal/store"
+	"github.com/normalone/lpeco/internal/vulndb"
 )
+
+type VulnerabilityInput struct {
+	Mode      model.VulnerabilityMode
+	Snapshot  *vulndb.Snapshot
+	LoadError error
+	Explicit  bool
+}
 
 type Options struct {
 	SessionID           string
@@ -38,6 +46,7 @@ type Options struct {
 	MaxParallel         int
 	Now                 func() time.Time
 	Wait                func(context.Context, time.Duration) error
+	Vulnerability       VulnerabilityInput
 }
 
 type Issue struct {
@@ -48,16 +57,18 @@ type Issue struct {
 }
 
 type Result struct {
-	SessionID         string                `json:"session_id"`
-	Profile           model.HostProfile     `json:"profile"`
-	Checkpoint        model.Checkpoint      `json:"checkpoint"`
-	Facts             []model.Fact          `json:"facts"`
-	Candidates        []model.Candidate     `json:"candidates"`
-	GraphDiagnostics  []graphpkg.Diagnostic `json:"graph_diagnostics"`
-	RuleDiagnostics   []rules.Diagnostic    `json:"rule_diagnostics"`
-	ObservablePreview []string              `json:"observable_preview"`
-	Issues            []Issue               `json:"issues"`
-	Phases            []Phase               `json:"phases"`
+	SessionID            string                      `json:"session_id"`
+	Profile              model.HostProfile           `json:"profile"`
+	Checkpoint           model.Checkpoint            `json:"checkpoint"`
+	Facts                []model.Fact                `json:"facts"`
+	Candidates           []model.Candidate           `json:"candidates"`
+	GraphDiagnostics     []graphpkg.Diagnostic       `json:"graph_diagnostics"`
+	RuleDiagnostics      []rules.Diagnostic          `json:"rule_diagnostics"`
+	ObservablePreview    []string                    `json:"observable_preview"`
+	Issues               []Issue                     `json:"issues"`
+	Phases               []Phase                     `json:"phases"`
+	Vulnerability        model.VulnerabilityCoverage `json:"vulnerability"`
+	VulnerabilityMatches []model.VulnerabilityMatch  `json:"vulnerability_matches"`
 }
 
 type RunError struct{ Issues []Issue }
@@ -110,7 +121,8 @@ func Run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 	}
 	now := options.Now()
 	session := model.Session{SchemaVersion: model.SessionSchemaVersion, ID: options.SessionID, CreatedAt: now, UpdatedAt: now, Status: model.SessionRunning,
-		TransportKind: options.TransportKind, Target: options.Target, Profile: cloneProfile(options.Profile), Checkpoint: newCheckpoint(now)}
+		TransportKind: options.TransportKind, Target: options.Target, Profile: cloneProfile(options.Profile), Checkpoint: newCheckpoint(now),
+		Vulnerability: model.VulnerabilityCoverage{Mode: options.Vulnerability.Mode, Status: model.VulnerabilityCoverageNotRun}}
 	if err := sessionStore.Create(ctx, session); err != nil {
 		return Result{}, fmt.Errorf("create session: %w", err)
 	}
@@ -122,7 +134,10 @@ func run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 		transport: transport, store: sessionStore, options: options, planner: options.Planner,
 		collectors: collectorsByID(options.Collectors), session: session, facts: append([]model.Fact(nil), initialFacts...),
 		factIDs: make(map[string]bool), checkpoint: normalizeCheckpoint(session.Checkpoint),
-		result:   Result{SessionID: options.SessionID, Profile: cloneProfile(session.Profile), ObservablePreview: []string{}, Issues: []Issue{}, Phases: []Phase{}},
+		result: Result{
+			SessionID: options.SessionID, Profile: cloneProfile(session.Profile), ObservablePreview: []string{}, Issues: []Issue{}, Phases: []Phase{},
+			Vulnerability: cloneVulnerabilityCoverage(session.Vulnerability), VulnerabilityMatches: []model.VulnerabilityMatch{},
+		},
 		evidence: make(map[string]model.ProbeStatus),
 	}
 	if existingEvidence, evidenceErr := sessionStore.ListEvidence(context.Background()); evidenceErr == nil {
@@ -133,6 +148,7 @@ func run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 	for _, fact := range r.facts {
 		r.factIDs[fact.ID] = true
 	}
+	r.result.VulnerabilityMatches, _ = vulnerabilityMatchesFromFacts(r.facts)
 	if r.result.Profile.AvailableCommands == nil {
 		r.result.Profile = cloneProfile(options.Profile)
 	}
@@ -218,6 +234,10 @@ func run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 			r.finish(ctx, false)
 			return r.finalResult()
 		}
+	}
+
+	if session.SchemaVersion != 1 {
+		r.runVulnerabilityPhase(ctx)
 	}
 
 	r.enterPhase(ctx, PhaseFinalize)
@@ -310,6 +330,7 @@ func (r *runner) finish(ctx context.Context, complete bool) {
 	r.session.Profile = cloneProfile(r.result.Profile)
 	r.session.GraphDiagnostics = append([]model.GraphDiagnostic(nil), r.result.GraphDiagnostics...)
 	r.session.RuleDiagnostics = append([]model.RuleDiagnostic(nil), r.result.RuleDiagnostics...)
+	r.session.Vulnerability = cloneVulnerabilityCoverage(r.result.Vulnerability)
 	r.session.UpdatedAt = r.options.Now()
 	if complete {
 		r.session.Status = model.SessionComplete
@@ -338,6 +359,8 @@ func (r *runner) finalResult() (Result, error) {
 	sort.Slice(r.result.Facts, func(i, j int) bool { return r.result.Facts[i].ID < r.result.Facts[j].ID })
 	r.result.ObservablePreview = uniqueStrings(r.result.ObservablePreview)
 	r.result.Issues = append([]Issue(nil), r.result.Issues...)
+	r.result.Vulnerability = cloneVulnerabilityCoverage(r.result.Vulnerability)
+	r.result.VulnerabilityMatches = cloneVulnerabilityMatches(r.result.VulnerabilityMatches)
 	result := r.result
 	if len(result.Issues) > 0 {
 		return result, &RunError{Issues: result.Issues}
@@ -375,6 +398,9 @@ func planCollectors(collectors []collect.Collector, profile model.HostProfile, d
 }
 
 func normalizeOptions(options Options) Options {
+	if options.Vulnerability.Mode == "" {
+		options.Vulnerability.Mode = model.VulnerabilityModeAuto
+	}
 	if options.Now == nil {
 		options.Now = func() time.Time { return time.Now().UTC() }
 	}
