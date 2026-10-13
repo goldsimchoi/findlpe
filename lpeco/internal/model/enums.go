@@ -47,19 +47,22 @@ const (
 type NodeKind string
 
 const (
-	NodePrincipal  NodeKind = "Principal"
-	NodeProcess    NodeKind = "Process"
-	NodeUnit       NodeKind = "Unit"
-	NodeTrigger    NodeKind = "Trigger"
-	NodeFile       NodeKind = "File"
-	NodeDirectory  NodeKind = "Directory"
-	NodeExecutable NodeKind = "Executable"
-	NodeScript     NodeKind = "Script"
-	NodeLibrary    NodeKind = "Library"
-	NodeSocket     NodeKind = "Socket"
-	NodeMount      NodeKind = "Mount"
-	NodeNamespace  NodeKind = "Namespace"
-	NodeContainer  NodeKind = "Container"
+	NodePrincipal     NodeKind = "Principal"
+	NodeProcess       NodeKind = "Process"
+	NodeUnit          NodeKind = "Unit"
+	NodeTrigger       NodeKind = "Trigger"
+	NodeFile          NodeKind = "File"
+	NodeDirectory     NodeKind = "Directory"
+	NodeExecutable    NodeKind = "Executable"
+	NodeScript        NodeKind = "Script"
+	NodeLibrary       NodeKind = "Library"
+	NodeSocket        NodeKind = "Socket"
+	NodeMount         NodeKind = "Mount"
+	NodeNamespace     NodeKind = "Namespace"
+	NodeContainer     NodeKind = "Container"
+	NodePackage       NodeKind = "Package"
+	NodeVulnerability NodeKind = "Vulnerability"
+	NodeKernel        NodeKind = "Kernel"
 )
 
 type EdgeKind string
@@ -79,4 +82,6 @@ const (
 	EdgeCanTraverse      EdgeKind = "CAN_TRAVERSE"
 	EdgeResolvesThrough  EdgeKind = "RESOLVES_THROUGH"
 	EdgeLocatedOn        EdgeKind = "LOCATED_ON"
+	EdgeProvidedBy       EdgeKind = "PROVIDED_BY"
+	EdgeAffectedBy       EdgeKind = "AFFECTED_BY"
 )

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +16,131 @@ import (
 	"github.com/normalone/lpeco/internal/model"
 )
 
+func TestLoadSchemaOneMarksLegacyVulnerabilityCoverage(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	store, err := Open(base, "schema-v1")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.Create(ctx, model.Session{ID: "schema-v1", SchemaVersion: 1}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fixture, err := os.ReadFile("testdata/schema-v1-session.json")
+	if err != nil {
+		t.Fatalf("read v1 fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "schema-v1", "session.json"), fixture, 0o600); err != nil {
+		t.Fatalf("install v1 fixture: %v", err)
+	}
+
+	got, err := store.Load(ctx, "schema-v1")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.SchemaVersion != 1 {
+		t.Fatalf("schema version = %d, want preserved v1", got.SchemaVersion)
+	}
+	if got.Vulnerability.Mode != model.VulnerabilityModeOff || got.Vulnerability.Status != model.VulnerabilityCoverageLegacyNotRequested {
+		t.Fatalf("legacy vulnerability coverage = %#v", got.Vulnerability)
+	}
+}
+
+func TestSchemaTwoRoundTripPreservesSnapshotReference(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	store, err := Open(base, "schema-v2")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	retrieved := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	want := model.Session{
+		SchemaVersion: model.SessionSchemaVersion,
+		ID:            "schema-v2",
+		CreatedAt:     retrieved,
+		UpdatedAt:     retrieved,
+		Status:        model.SessionComplete,
+		TransportKind: "c2-plugin",
+		Vulnerability: model.VulnerabilityCoverage{
+			Mode:            model.VulnerabilityModeRequired,
+			Status:          model.VulnerabilityCoverageComplete,
+			Provider:        "ubuntu",
+			SelectedRelease: "24.04",
+			SelectedChannel: "standard",
+			Snapshot: model.SnapshotReference{
+				Provider:            "ubuntu",
+				SchemaVersion:       1,
+				Digest:              "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				RetrievedAt:         retrieved,
+				ProviderModifiedAt:  retrieved.Add(-time.Hour),
+				Stale:               false,
+				SupportedReleases:   []string{"22.04", "24.04", "26.04"},
+				ImpactCatalogDigest: "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			},
+		},
+	}
+	if err := store.Create(ctx, want); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := store.Load(ctx, want.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantJSON, err := json.Marshal(want.Vulnerability)
+	if err != nil {
+		t.Fatalf("marshal expected coverage: %v", err)
+	}
+	gotJSON, err := json.Marshal(got.Vulnerability)
+	if err != nil {
+		t.Fatalf("marshal loaded coverage: %v", err)
+	}
+	if !bytes.Equal(gotJSON, wantJSON) {
+		t.Fatalf("coverage JSON changed\ngot:  %s\nwant: %s", gotJSON, wantJSON)
+	}
+}
+
+func TestLoadRejectsFutureSessionSchema(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	store, err := Open(base, "future-schema")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.Create(ctx, model.Session{ID: "future-schema", SchemaVersion: model.SessionSchemaVersion}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	path := filepath.Join(base, "future-schema", "session.json")
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	encoded = bytes.Replace(encoded, []byte(`"schema_version": 2`), []byte(`"schema_version": 3`), 1)
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatalf("write future session: %v", err)
+	}
+	if _, err := store.Load(ctx, "future-schema"); err == nil || !strings.Contains(err.Error(), "unsupported session schema 3") {
+		t.Fatalf("Load future schema error = %v", err)
+	}
+}
+
+func TestCreateDefaultsToCurrentSessionSchema(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(t.TempDir(), "default-schema")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.Create(ctx, model.Session{ID: "default-schema"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := store.Load(ctx, "default-schema")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.SchemaVersion != model.SessionSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", got.SchemaVersion, model.SessionSchemaVersion)
+	}
+}
+
 func TestStoreCreatesPrivateLayoutAndPersistsSession(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
@@ -23,7 +149,7 @@ func TestStoreCreatesPrivateLayoutAndPersistsSession(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	want := model.Session{
-		SchemaVersion: 1,
+		SchemaVersion: model.SessionSchemaVersion,
 		ID:            "session-one",
 		CreatedAt:     time.Unix(1_700_000_000, 0).UTC(),
 		UpdatedAt:     time.Unix(1_700_000_000, 0).UTC(),
@@ -59,7 +185,7 @@ func TestPutEvidenceHashesAndDeduplicatesFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := store.Create(ctx, model.Session{ID: "session-evidence", SchemaVersion: 1}); err != nil {
+	if err := store.Create(ctx, model.Session{ID: "session-evidence", SchemaVersion: model.SessionSchemaVersion}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -113,7 +239,7 @@ func TestFactsJSONLRoundTripAndRejectsTruncatedRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := store.Create(ctx, model.Session{ID: "session-facts", SchemaVersion: 1}); err != nil {
+	if err := store.Create(ctx, model.Session{ID: "session-facts", SchemaVersion: model.SessionSchemaVersion}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	want := []model.Fact{{
@@ -155,7 +281,7 @@ func TestCandidatesAndCheckpointReplaceAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := store.Create(ctx, model.Session{ID: "session-state", SchemaVersion: 1}); err != nil {
+	if err := store.Create(ctx, model.Session{ID: "session-state", SchemaVersion: model.SessionSchemaVersion}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

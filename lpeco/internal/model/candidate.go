@@ -23,6 +23,7 @@ type Candidate struct {
 	Trigger            *NodeRef         `json:"trigger,omitempty"`
 	PathNodes          []NodeRef        `json:"path_nodes"`
 	EvidenceIDs        []string         `json:"evidence_ids"`
+	RelatedMatchIDs    []string         `json:"related_match_ids,omitempty"`
 	MissingFacts       []string         `json:"missing_facts"`
 	ValidationStatus   ValidationStatus `json:"validation_status"`
 	Summary            string           `json:"summary"`
@@ -46,6 +47,22 @@ func (c Candidate) Validate() error {
 	}
 	if c.Priority == PriorityP0 && (c.Confidence != ConfidenceHigh || len(c.MissingFacts) > 0) {
 		return errors.New("P0 candidate requires high confidence and no missing facts")
+	}
+	if c.Category == "known-vulnerability" {
+		if c.Priority == PriorityP0 {
+			return errors.New("known-vulnerability candidate cannot be P0")
+		}
+		if len(c.RelatedMatchIDs) == 0 {
+			return errors.New("known-vulnerability candidate requires at least one related match")
+		}
+		for index, id := range c.RelatedMatchIDs {
+			if strings.TrimSpace(id) == "" {
+				return errors.New("known-vulnerability candidate related match ID is empty")
+			}
+			if index > 0 && c.RelatedMatchIDs[index-1] >= id {
+				return errors.New("known-vulnerability candidate related match IDs must be sorted and unique")
+			}
+		}
 	}
 	if c.CurrentPrincipal.ID == "" {
 		return errors.New("current principal is required")

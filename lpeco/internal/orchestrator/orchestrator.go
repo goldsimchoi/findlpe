@@ -109,7 +109,7 @@ func Run(ctx context.Context, transport adapter.Adapter, sessionStore store.Sess
 		return Result{}, errors.New("session ID is required")
 	}
 	now := options.Now()
-	session := model.Session{SchemaVersion: 1, ID: options.SessionID, CreatedAt: now, UpdatedAt: now, Status: model.SessionRunning,
+	session := model.Session{SchemaVersion: model.SessionSchemaVersion, ID: options.SessionID, CreatedAt: now, UpdatedAt: now, Status: model.SessionRunning,
 		TransportKind: options.TransportKind, Target: options.Target, Profile: cloneProfile(options.Profile), Checkpoint: newCheckpoint(now)}
 	if err := sessionStore.Create(ctx, session); err != nil {
 		return Result{}, fmt.Errorf("create session: %w", err)

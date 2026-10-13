@@ -91,7 +91,10 @@ func (s *Store) Create(ctx context.Context, session model.Session) error {
 		return fmt.Errorf("restrict evidence directory: %w", err)
 	}
 	if session.SchemaVersion == 0 {
-		session.SchemaVersion = 1
+		session.SchemaVersion = model.SessionSchemaVersion
+	}
+	if _, err := normalizeLoadedSession(session); err != nil {
+		return err
 	}
 	if err := writeJSONAtomic(ctx, s.layout.session, session); err != nil {
 		return err
@@ -126,7 +129,22 @@ func (s *Store) loadSessionLocked(ctx context.Context) (model.Session, error) {
 	if session.ID != s.sessionID {
 		return model.Session{}, fmt.Errorf("session metadata ID %q does not match directory %q", session.ID, s.sessionID)
 	}
-	return session, nil
+	return normalizeLoadedSession(session)
+}
+
+func normalizeLoadedSession(session model.Session) (model.Session, error) {
+	switch session.SchemaVersion {
+	case 1:
+		session.Vulnerability = model.VulnerabilityCoverage{
+			Mode:   model.VulnerabilityModeOff,
+			Status: model.VulnerabilityCoverageLegacyNotRequested,
+		}
+		return session, nil
+	case model.SessionSchemaVersion:
+		return session, nil
+	default:
+		return model.Session{}, fmt.Errorf("unsupported session schema %d (supported: 1-%d)", session.SchemaVersion, model.SessionSchemaVersion)
+	}
 }
 
 func (s *Store) PutEvidence(ctx context.Context, evidence model.Evidence, body io.Reader) (model.Evidence, bool, error) {
