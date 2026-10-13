@@ -1,7 +1,7 @@
 # LPECO 지속 개발 및 저장소 운영 설계
 
 작성일: 2026-10-12
-상태: 대화상 방향 승인, 작성된 명세 사용자 검토 대기
+상태: 사용자 승인, 구현 중
 
 ## 1. 목적과 성공 조건
 
@@ -25,10 +25,11 @@ LPECO를 일회성 MVP 브랜치가 아니라 장기간 유지되는 오픈소�
 
 ## 2. 현재 상태와 제약
 
-- Git 저장소에는 `main`과 `feature/lpeco-mvp`가 있다.
-- 전체 MVP 구현은 `feature/lpeco-mvp`에 있고 `main`은 설계 문서와 초기
-  저장소 설정까지만 포함한다.
-- 원격 저장소는 아직 연결되어 있지 않다.
+- 로컬 MVP 이력은 장기 통합 브랜치 `develop`에 있다.
+- 원격 저장소는 `https://github.com/goldsimchoi/findlpe.git`이며, 기존
+  `main`의 초기 README commit은 변경하지 않고 `develop` 이력에 병합했다.
+- 원격 `main`은 릴리스 브랜치로 보존하고, `develop`을 기본 통합 브랜치로
+  설정한다.
 - Go module은 저장소의 `lpeco/` 하위에 있으며 module path는
   `github.com/normalone/lpeco`다.
 - `make verify`와 통합 테스트는 존재하지만 GitHub Actions, 기여 가이드,
@@ -128,9 +129,8 @@ CLI 옵션, JSON report schema, 저장 session schema와 adapter protocol을
 - `CODEOWNERS`: repository ownership과 보안 민감 파일의 review routing
 - `dependabot.yml`: Go modules와 GitHub Actions를 월 단위로 점검
 
-`CODEOWNERS`는 module path의 저장소 소유자인 `@normalone`을 기본 owner로
-사용한다. 원격 저장소의 실제 owner가 다르면 첫 push 전에 함께 변경해야
-한다. 단일 maintainer가 자신의 PR을 승인할 수 없으므로 초기 ruleset에서
+`CODEOWNERS`는 원격 저장소 소유자인 `@goldsimchoi`를 기본 owner로 사용한다.
+단일 maintainer가 자신의 PR을 승인할 수 없으므로 초기 ruleset에서
 CODEOWNER approval을 필수로 걸지는 않는다. 두 번째 maintainer가 생기면
 필수 승인 1개와 CODEOWNER review를 활성화한다.
 
@@ -312,10 +312,10 @@ minor update는 ecosystem별로 묶되 major update는 별도 PR로 만들어 �
 - `govulncheck`를 실행할 수 없는 환경은 성공으로 간주하지 않는다.
 - VM image가 없는 일반 CI는 VM test를 `skipped`로 위장하지 않는다. VM
   검증은 별도 release evidence로 기록한다.
-- 원격 저장소가 없으므로 ruleset, private vulnerability reporting와 default
-  branch 변경은 이번 로컬 commit만으로 완료되었다고 주장하지 않는다.
-- GitHub owner, repository URL 또는 license가 정해지지 않은 상태에서 가짜
-  식별자나 연락처를 만들지 않는다.
+- ruleset, private vulnerability reporting와 default branch 변경은 실제
+  GitHub API readback 전에는 완료되었다고 주장하지 않는다.
+- license 또는 보안 연락처가 정해지지 않은 상태에서 가짜 식별자나 연락처를
+  만들지 않는다.
 
 ## 13. 구현 순서
 
