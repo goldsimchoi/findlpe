@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "provider": "ubuntu",
+  "reviewed_at": "2026-10-14T00:00:00Z",
+  "releases": [
+    {
+      "version_id": "22.04",
+      "codename": "jammy",
+      "channel": "standard"
+    },
+    {
+      "version_id": "24.04",
+      "codename": "noble",
+      "channel": "standard"
+    },
+    {
+      "version_id": "26.04",
+      "codename": "resolute",
+      "channel": "standard"
+    }
+  ]
+}

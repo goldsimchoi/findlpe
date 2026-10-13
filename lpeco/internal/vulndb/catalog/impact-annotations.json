@@ -1,0 +1,27 @@
+[
+  {
+    "id": "ubuntu-cve-2023-4911-suid-loader-v1",
+    "schema_version": 1,
+    "provider": "ubuntu",
+    "vulnerability_id": "CVE-2023-4911",
+    "source_packages": [
+      "glibc"
+    ],
+    "binary_packages": [
+      "libc6"
+    ],
+    "affected_use": [
+      "LOADS"
+    ],
+    "reachability": [
+      "CAN_EXECUTE"
+    ],
+    "impact_class": "local-privilege-boundary",
+    "target_constraint": "different-principal",
+    "official_references": [
+      "https://ubuntu.com/security/CVE-2023-4911",
+      "https://ubuntu.com/security/notices/USN-6409-1"
+    ],
+    "reviewed_at": "2026-10-14T00:00:00Z"
+  }
+]
