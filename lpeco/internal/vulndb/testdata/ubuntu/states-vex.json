@@ -1,0 +1,69 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://example.invalid/sanitized/CVE-2025-0001",
+  "author": "Canonical Ltd.",
+  "timestamp": "2026-10-13T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {"@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-0001", "name": "CVE-2025-0001", "description": "VEX-PROSE-MUST-NOT-BE-NORMALIZED", "aliases": ["https://ubuntu.com/security/CVE-2025-0001"]},
+      "timestamp": "2026-10-10T00:00:00Z",
+      "products": [
+        {"@id": "pkg:deb/ubuntu/open-aff@1.0-1?arch=source&distro=jammy"},
+        {"@id": "pkg:deb/ubuntu/open-aff-bin@1.0-1?arch=amd64&distro=jammy"}
+      ],
+      "status": "affected",
+      "action_statement": "PROSE-MUST-NOT-BE-NORMALIZED"
+    },
+    {
+      "vulnerability": {"@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-0001", "name": "CVE-2025-0001"},
+      "timestamp": "2026-10-10T00:00:00Z",
+      "products": [
+        {"@id": "pkg:deb/ubuntu/not-aff@1.0-1?arch=source&distro=jammy"},
+        {"@id": "pkg:deb/ubuntu/not-aff-bin@1.0-1?arch=amd64&distro=jammy"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present"
+    },
+    {
+      "vulnerability": {"@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-0001", "name": "CVE-2025-0001"},
+      "timestamp": "2026-10-10T00:00:00Z",
+      "products": [
+        {"@id": "pkg:deb/ubuntu/investigate@1.0-1?arch=source&distro=jammy"},
+        {"@id": "pkg:deb/ubuntu/investigate-bin@1.0-1?arch=arm64&distro=jammy"}
+      ],
+      "status": "under_investigation",
+      "status_notes": "PROSE-MUST-NOT-BE-NORMALIZED"
+    },
+    {
+      "vulnerability": {"@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-0001", "name": "CVE-2025-0001"},
+      "timestamp": "2026-10-10T00:00:00Z",
+      "products": [
+        {"@id": "pkg:deb/ubuntu/conflict@1.0-1?arch=source&distro=jammy"},
+        {"@id": "pkg:deb/ubuntu/conflict-bin@1.0-1?arch=amd64&distro=jammy"}
+      ],
+      "status": "affected",
+      "action_statement": "PROSE-MUST-NOT-BE-NORMALIZED"
+    },
+    {
+      "vulnerability": {"@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-0001", "name": "CVE-2025-0001"},
+      "timestamp": "2026-10-11T00:00:00Z",
+      "products": [
+        {"@id": "pkg:deb/ubuntu/conflict@1.0-2?arch=source&distro=jammy"},
+        {"@id": "pkg:deb/ubuntu/conflict-bin@1.0-2?arch=amd64&distro=jammy"}
+      ],
+      "status": "fixed",
+      "status_notes": "PROSE-MUST-NOT-BE-NORMALIZED"
+    },
+    {
+      "vulnerability": {"@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-0001", "name": "CVE-2025-0001"},
+      "timestamp": "2026-10-10T00:00:00Z",
+      "products": [
+        {"@id": "pkg:deb/ubuntu/fixedpkg@2.0-2?arch=source&distro=noble"},
+        {"@id": "pkg:deb/ubuntu/fixedpkg-bin@2.0-2?arch=amd64&distro=noble"}
+      ],
+      "status": "fixed",
+      "status_notes": "PROSE-MUST-NOT-BE-NORMALIZED"
+    }
+  ]
+}

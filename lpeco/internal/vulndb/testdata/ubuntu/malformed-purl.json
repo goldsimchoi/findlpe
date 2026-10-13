@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.7.0",
+  "id": "UBUNTU-CVE-2025-0003",
+  "upstream": ["CVE-2025-0003"],
+  "modified": "2026-10-11T00:00:00Z",
+  "affected": [
+    {
+      "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "broken", "purl": "pkg:rpm/not-ubuntu/broken@1.0"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+      "versions": [],
+      "ecosystem_specific": {}
+    }
+  ]
+}

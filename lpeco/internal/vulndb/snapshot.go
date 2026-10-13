@@ -307,7 +307,7 @@ func canonicalSnapshot(input Snapshot) Snapshot {
 		record.ProviderStatuses = append([]ProviderStatus(nil), record.ProviderStatuses...)
 		sort.Slice(record.ProviderStatuses, func(i, j int) bool {
 			left, right := record.ProviderStatuses[i], record.ProviderStatuses[j]
-			return left.Source+"\x00"+left.Status+"\x00"+left.FixedVersion < right.Source+"\x00"+right.Status+"\x00"+right.FixedVersion
+			return providerStatusSortKey(left) < providerStatusSortKey(right)
 		})
 		record.CVEIDs = canonicalStrings(record.CVEIDs)
 		record.USNIDs = canonicalStrings(record.USNIDs)
@@ -354,7 +354,7 @@ func validateSnapshotFields(snapshot Snapshot) error {
 	seenRecord := make(map[string]bool)
 	for index, record := range snapshot.Advisories {
 		if record.RecordID == "" || record.Provider != manifest.Provider || !strings.HasPrefix(record.VulnerabilityID, "CVE-") ||
-			record.Release == "" || record.Channel == "" || record.Affected.SourcePackage == "" || len(record.Affected.BinaryPackages) == 0 {
+			record.Release == "" || record.Channel == "" || record.Affected.SourcePackage == "" {
 			return fmt.Errorf("advisory record %d has incomplete identity or package scope", index)
 		}
 		key := advisorySortKey(record)
@@ -368,8 +368,8 @@ func validateSnapshotFields(snapshot Snapshot) error {
 			default:
 				return fmt.Errorf("advisory record %d has unsupported provider status %q", index, status.Status)
 			}
-			if status.Source == "" {
-				return fmt.Errorf("advisory record %d has provider status without source", index)
+			if status.Source == "" || status.SourcePackage != record.Affected.SourcePackage {
+				return fmt.Errorf("advisory record %d has provider status without matching source scope", index)
 			}
 		}
 	}
@@ -687,6 +687,10 @@ func sourceSortKey(source Source) string {
 
 func advisorySortKey(record AdvisoryRecord) string {
 	return record.Release + "\x00" + record.Affected.SourcePackage + "\x00" + record.VulnerabilityID + "\x00" + record.RecordID
+}
+
+func providerStatusSortKey(status ProviderStatus) string {
+	return status.Source + "\x00" + status.SourcePackage + "\x00" + status.BinaryPackage + "\x00" + status.Architecture + "\x00" + status.Version + "\x00" + status.Status + "\x00" + status.FixedVersion
 }
 
 func syncDirectory(path string) error {

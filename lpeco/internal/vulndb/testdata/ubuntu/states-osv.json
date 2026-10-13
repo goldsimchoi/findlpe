@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.7.0",
+  "id": "UBUNTU-CVE-2025-0001",
+  "details": "STATE-FIXTURE-PROSE-MUST-NOT-BE-NORMALIZED",
+  "upstream": ["CVE-2025-0001"],
+  "related": ["USN-9000-1"],
+  "severity": [{"type": "Ubuntu", "score": "medium"}],
+  "modified": "2026-10-12T00:00:00Z",
+  "affected": [
+    {
+      "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "open-aff", "purl": "pkg:deb/ubuntu/open-aff@1.0-1?arch=source&distro=jammy"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+      "versions": ["1.0-1"],
+      "ecosystem_specific": {"binaries": [{"binary_name": "open-aff-bin", "binary_version": "1.0-1"}]}
+    },
+    {
+      "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "not-aff", "purl": "pkg:deb/ubuntu/not-aff@1.0-1?arch=source&distro=jammy"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+      "versions": [],
+      "ecosystem_specific": {"binaries": [{"binary_name": "not-aff-bin", "binary_version": "1.0-1"}]}
+    },
+    {
+      "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "investigate", "purl": "pkg:deb/ubuntu/investigate@1.0-1?arch=source&distro=jammy"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+      "versions": [],
+      "ecosystem_specific": {"binaries": [{"binary_name": "investigate-bin", "binary_version": "1.0-1"}]}
+    },
+    {
+      "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "conflict", "purl": "pkg:deb/ubuntu/conflict@1.0-1?arch=source&distro=jammy"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+      "versions": [],
+      "ecosystem_specific": {"binaries": [{"binary_name": "conflict-bin", "binary_version": "1.0-1"}]}
+    },
+    {
+      "package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "fixedpkg", "purl": "pkg:deb/ubuntu/fixedpkg@2.0-2?arch=source&distro=noble"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.0-2"}]}],
+      "versions": ["2.0-1"],
+      "ecosystem_specific": {"binaries": [{"binary_name": "fixedpkg-bin", "binary_version": "2.0-2"}]}
+    },
+    {
+      "package": {"ecosystem": "Ubuntu:Pro:22.04:LTS", "name": "pro-pkg", "purl": "pkg:deb/ubuntu/pro-pkg@3.0-1+esm1?arch=source&distro=esm-infra/jammy"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+      "versions": ["3.0-1"],
+      "ecosystem_specific": {"binaries": [{"binary_name": "pro-pkg-bin", "binary_version": "3.0-1+esm1"}]}
+    },
+    {
+      "package": {"ecosystem": "Ubuntu:20.04:LTS", "name": "eol-pkg", "purl": "pkg:deb/ubuntu/eol-pkg@4.0-1?arch=source&distro=focal"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+      "versions": ["4.0-1"],
+      "ecosystem_specific": {"binaries": [{"binary_name": "eol-pkg-bin", "binary_version": "4.0-1"}]}
+    }
+  ],
+  "references": [{"type": "REPORT", "url": "https://ubuntu.com/security/CVE-2025-0001"}]
+}

@@ -77,9 +77,13 @@ type AffectedPackage struct {
 // ProviderStatus is an exact official status supplement for the enclosing
 // advisory record's release and package scope.
 type ProviderStatus struct {
-	Source       string `json:"source"`
-	Status       string `json:"status"`
-	FixedVersion string `json:"fixed_version,omitempty"`
+	Source        string `json:"source"`
+	Status        string `json:"status"`
+	SourcePackage string `json:"source_package"`
+	BinaryPackage string `json:"binary_package,omitempty"`
+	Architecture  string `json:"architecture,omitempty"`
+	Version       string `json:"version,omitempty"`
+	FixedVersion  string `json:"fixed_version,omitempty"`
 }
 
 // AdvisoryRecord is the normalized, prose-free unit used by matching.

@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.7.0",
+  "id": "UBUNTU-CVE-2025-0002",
+  "upstream": ["CVE-2025-0002"],
+  "modified": "2026-10-11T00:00:00Z",
+  "affected": [
+    {
+      "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "alpha", "purl": "pkg:deb/ubuntu/alpha@1.0-2?arch=source&distro=jammy"},
+      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.0-2"}]}],
+      "versions": ["1.0-1"],
+      "ecosystem_specific": {"binaries": [{"binary_name": "alpha-bin", "binary_version": "1.0-2"}]}
+    }
+  ],
+  "references": [{"type": "REPORT", "url": "https://ubuntu.com/security/CVE-2025-0002"}]
+}

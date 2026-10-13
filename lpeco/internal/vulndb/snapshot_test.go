@@ -247,7 +247,7 @@ func snapshotFixture(t *testing.T) Snapshot {
 			{
 				RecordID: "record-a", Provider: "ubuntu", VulnerabilityID: "CVE-2023-4911", Release: "22.04", Codename: "jammy", Channel: "standard",
 				Affected:         AffectedPackage{SourcePackage: "glibc", BinaryPackages: []string{"libc6"}, Architectures: []string{"amd64", "arm64"}, FixedVersion: "2.35-0ubuntu3.4"},
-				ProviderStatuses: []ProviderStatus{{Source: "vex", Status: "fixed", FixedVersion: "2.35-0ubuntu3.4"}},
+				ProviderStatuses: []ProviderStatus{{Source: "vex", Status: "fixed", SourcePackage: "glibc", FixedVersion: "2.35-0ubuntu3.4"}},
 				CVEIDs:           []string{"CVE-2023-4911"}, USNIDs: []string{"USN-6409-1"},
 				OfficialReferences: []string{"https://ubuntu.com/security/notices/USN-6409-1", "https://ubuntu.com/security/CVE-2023-4911"},
 			},
