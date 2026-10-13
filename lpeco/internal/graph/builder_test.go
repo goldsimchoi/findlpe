@@ -3,15 +3,125 @@ package graph
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/normalone/lpeco/internal/collect/context"
+	"github.com/normalone/lpeco/internal/collect/packageinfo"
 	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	"github.com/normalone/lpeco/internal/collect/process"
 	"github.com/normalone/lpeco/internal/collect/systemd"
 	"github.com/normalone/lpeco/internal/model"
 	"github.com/normalone/lpeco/internal/systemdunit"
 )
+
+func TestGraphMaterializesVulnerabilityPackageAndKernelRelationships(t *testing.T) {
+	installed := packageinfo.InstalledPackageFact{
+		RequestedPackage: "libc6:amd64", Manager: "dpkg", Status: "install ok installed", BinaryPackage: "libc6", Architecture: "amd64",
+		BinaryVersion: model.DebianVersion{Raw: "2.35-0ubuntu3.3", Upstream: "2.35", Revision: "0ubuntu3.3", Valid: true},
+		SourcePackage: "glibc", SourceVersion: model.DebianVersion{Raw: "2.35-0ubuntu3.3", Upstream: "2.35", Revision: "0ubuntu3.3", Valid: true},
+		EvidenceIDs: []string{"e-metadata"}, Confidence: model.ConfidenceHigh,
+	}
+	ownership := packageinfo.OwnershipFact{
+		Path: "/usr/lib/x86_64-linux-gnu/libc.so.6", ResolvedPath: "/usr/lib/x86_64-linux-gnu/libc.so.6", Manager: "dpkg",
+		Packages: []string{"libc6:amd64"}, ObservedPackages: []string{"libc6:amd64"}, ResolvedPackages: []string{"libc6:amd64"},
+		Owned: true, EvidenceIDs: []string{"e-owner"}, Confidence: model.ConfidenceHigh,
+	}
+	affected := graphMatchFixture("match-affected", "record-4911", model.VulnerabilityStateAffected, false)
+	kernelAffected := graphMatchFixture("match-kernel", "record-4911", model.VulnerabilityStateAffected, true)
+	fixed := graphMatchFixture("match-fixed", "record-fixed", model.VulnerabilityStateFixed, false)
+	unknown := graphMatchFixture("match-unknown", "record-unknown", model.VulnerabilityStateUnknown, false)
+	unknown.MissingFacts = []string{"provider status remains under investigation"}
+	unknown.Confidence = model.ConfidenceMedium
+	facts := []model.Fact{
+		makeFact(t, "identity", "context", "e-identity", model.ConfidenceHigh, context.IdentityFact{UIDs: [4]int{1000, 1000, 1000, 1000}, GIDs: [4]int{1000, 1000, 1000, 1000}}),
+		makeFact(t, "process", "process", "e-process", model.ConfidenceHigh, process.ProcessFact{PID: 7, StartTime: 1, Name: "root-consumer", UIDs: [4]int{0, 0, 0, 0}, GIDs: [4]int{0, 0, 0, 0}, EvidenceIDs: []string{"e-process"}, Confidence: model.ConfidenceHigh}),
+		makeFact(t, "process_dependency", "process", "e-dependency", model.ConfidenceHigh, process.ProcessDependencyFact{PID: 7, StartTime: 1, MappedFiles: []string{ownership.Path}, EvidenceIDs: []string{"e-dependency"}}),
+		makeFact(t, "package_ownership", "packageinfo", "e-owner", model.ConfidenceHigh, ownership),
+		makeFact(t, "installed_package", "packageinfo", "e-metadata", model.ConfidenceHigh, installed),
+		makeFact(t, "vulnerability_match", "vulnerability", "e-match", model.ConfidenceHigh, affected),
+		makeFact(t, "vulnerability_match", "vulnerability", "e-kernel-match", model.ConfidenceHigh, kernelAffected),
+		makeFact(t, "vulnerability_match", "vulnerability", "e-fixed", model.ConfidenceHigh, fixed),
+		makeFact(t, "vulnerability_match", "vulnerability", "e-unknown", model.ConfidenceMedium, unknown),
+	}
+
+	left, diagnostics := Build(facts)
+	if hasDiagnosticCode(diagnostics, "build-error") || hasDiagnosticCode(diagnostics, "vulnerability-package-missing") {
+		t.Fatalf("unexpected vulnerability graph diagnostics: %#v", diagnostics)
+	}
+	rightFacts := slices.Clone(facts)
+	slices.Reverse(rightFacts)
+	right, _ := Build(rightFacts)
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	if string(leftJSON) != string(rightJSON) {
+		t.Fatalf("vulnerability graph is not deterministic\nleft=%s\nright=%s", leftJSON, rightJSON)
+	}
+	if len(left.NodesByKind(model.NodePackage)) != 1 || len(left.NodesByKind(model.NodeVulnerability)) != 1 || len(left.NodesByKind(model.NodeKernel)) != 1 {
+		t.Fatalf("materialized nodes: packages=%#v vulnerabilities=%#v kernels=%#v", left.NodesByKind(model.NodePackage), left.NodesByKind(model.NodeVulnerability), left.NodesByKind(model.NodeKernel))
+	}
+	provided, affectedEdges := edgesByKind(left, model.EdgeProvidedBy), edgesByKind(left, model.EdgeAffectedBy)
+	if len(provided) != 2 || len(affectedEdges) != 2 {
+		t.Fatalf("provided/affected edges = %d/%d: %#v", len(provided), len(affectedEdges), left.Edges())
+	}
+	for _, edge := range affectedEdges {
+		if StringAttribute(edge.Attributes, "snapshot_digest") != affected.SnapshotDigest ||
+			(StringAttribute(edge.Attributes, "match_id") != affected.ID && StringAttribute(edge.Attributes, "match_id") != kernelAffected.ID) {
+			t.Fatalf("affected edge lost provenance: %#v", edge)
+		}
+		if len(edge.EvidenceIDs) == 0 {
+			t.Fatalf("affected edge lost target evidence: %#v", edge)
+		}
+	}
+	if len(left.Facts("vulnerability_match")) != 4 {
+		t.Fatalf("non-affected match facts were discarded: %#v", left.Facts("vulnerability_match"))
+	}
+}
+
+func TestGraphDiagnosesAmbiguousOwnershipAndMissingMatchPackage(t *testing.T) {
+	ambiguous := packageinfo.OwnershipFact{
+		Path: "/usr/lib/libambiguous.so", Manager: "dpkg", Packages: []string{"a:amd64", "b:amd64"}, Owned: true, Ambiguous: true,
+		EvidenceIDs: []string{"e-owner"}, MissingFacts: []string{"package ownership is ambiguous"}, Confidence: model.ConfidenceMedium,
+	}
+	missingPackage := graphMatchFixture("match-missing", "record-missing", model.VulnerabilityStateAffected, false)
+	missingPackage.BinaryPackage = "absent"
+	missingPackage.SourcePackage = "absent-source"
+	facts := []model.Fact{
+		makeFact(t, "package_ownership", "packageinfo", "e-owner", model.ConfidenceMedium, ambiguous),
+		makeFact(t, "vulnerability_match", "vulnerability", "e-match", model.ConfidenceHigh, missingPackage),
+	}
+	built, diagnostics := Build(facts)
+	if len(edgesByKind(built, model.EdgeProvidedBy)) != 0 || len(edgesByKind(built, model.EdgeAffectedBy)) != 0 {
+		t.Fatalf("ambiguous/missing inputs produced relationships: %#v", built.Edges())
+	}
+	if !hasDiagnosticCode(diagnostics, "package-ownership-ambiguous") || !hasDiagnosticCode(diagnostics, "vulnerability-package-missing") {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func graphMatchFixture(id, record string, state model.VulnerabilityState, kernel bool) model.VulnerabilityMatch {
+	missing := []string{}
+	confidence := model.ConfidenceHigh
+	return model.VulnerabilityMatch{
+		ID: id, Provider: "ubuntu", SnapshotDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		DistributionID: "ubuntu", Release: "22.04", Codename: "jammy", Channel: "standard", Architecture: "amd64",
+		BinaryPackage: "libc6", BinaryArchitecture: "amd64", BinaryVersion: model.DebianVersion{Raw: "2.35-0ubuntu3.3", Valid: true},
+		SourcePackage: "glibc", SourceVersion: model.DebianVersion{Raw: "2.35-0ubuntu3.3", Valid: true},
+		AdvisoryID: "CVE-2023-4911", RecordID: record, CVEIDs: []string{"CVE-2023-4911"},
+		State: state, Reason: "fixture comparison", Kernel: kernel, ImpactAnnotationIDs: []string{"ubuntu-cve-2023-4911-suid-loader-v1"},
+		TargetEvidenceIDs: []string{"e-match"}, MissingFacts: missing, Confidence: confidence,
+	}
+}
+
+func edgesByKind(g *Graph, kind model.EdgeKind) []model.Edge {
+	var result []model.Edge
+	for _, edge := range g.Edges() {
+		if edge.Kind == kind {
+			result = append(result, edge)
+		}
+	}
+	return result
+}
 
 func TestGraphDoesNotGrantPathControlFromIncompleteMountInventory(t *testing.T) {
 	facts := []model.Fact{

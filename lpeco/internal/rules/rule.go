@@ -45,6 +45,7 @@ func AllRules() []Rule {
 		loaderPathControlRule{},
 		sudoPolicyRule{},
 		adminSocketControlRule{},
+		knownPrivilegePathRule{},
 	)
 }
 

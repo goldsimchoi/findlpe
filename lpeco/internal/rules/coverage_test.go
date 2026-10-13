@@ -37,8 +37,8 @@ func TestAllRulesHavePositiveAndTwoNegatives(t *testing.T) {
 			t.Errorf("rule %s has %d positives and %d negatives", rule.ID(), count.positive, count.negative)
 		}
 	}
-	if len(seen) != 11 || len(counts) != 11 {
-		t.Fatalf("registry/fixture rule counts = %d/%d, want 11/11", len(seen), len(counts))
+	if len(seen) != 12 || len(counts) != 12 {
+		t.Fatalf("registry/fixture rule counts = %d/%d, want 12/12", len(seen), len(counts))
 	}
 	ranks := []struct {
 		name  string

@@ -104,6 +104,7 @@ func Build(facts []model.Fact) (*Graph, []Diagnostic) {
 		}
 	}
 	b.addFilesystemRelationships()
+	b.addPackageVulnerabilityRelationships(ordered)
 	b.sortDiagnostics()
 	return b.graph, b.diagnostics
 }
