@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scan_status": "complete",
+  "results": [
+    {
+      "source": {"path": "fixture.lock", "type": "lockfile"},
+      "packages": [
+        {
+          "package": {"name": "demo", "version": "1.0-1", "ecosystem": "Ubuntu:22.04"},
+          "benchmark_state": "affected",
+          "vulnerabilities": [
+            {
+              "id": "CVE-2099-4001",
+              "summary": "Provider advisory prose is ignored.",
+              "severity": [{"type": "CVSS_V3", "score": "9.8"}]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

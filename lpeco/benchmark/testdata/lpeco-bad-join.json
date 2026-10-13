@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "session": {
+    "schema_version": 2,
+    "id": "bad-join",
+    "status": "complete",
+    "transport_kind": "ssh",
+    "profile": {"distribution": {"id": "ubuntu", "version_id": "22.04"}},
+    "checkpoint": {},
+    "vulnerability": {"mode": "auto", "status": "complete", "selected_release": "22.04", "snapshot": {"digest": "d610988e192438d45a99d151296eaad4a3c3e9cbb20729a7041d6d4bf4c8ba64", "impact_catalog_digest": "e989f283b88336525c314a4898ceaae909009d71fe459c0503ebde94a2fd72cf", "stale": false}}
+  },
+  "facts": [],
+  "candidates": [{"id":"bad","rule_id":"vulnerability.known-privilege-path","category":"known-vulnerability","priority":"P1","related_match_ids":["missing-match"]}],
+  "evidence": [],
+  "graph": {},
+  "graph_diagnostics": [],
+  "rule_diagnostics": [],
+  "known_vulnerabilities": {
+    "coverage": {"mode": "auto", "status": "complete", "selected_release": "22.04", "snapshot": {"digest": "d610988e192438d45a99d151296eaad4a3c3e9cbb20729a7041d6d4bf4c8ba64", "impact_catalog_digest": "e989f283b88336525c314a4898ceaae909009d71fe459c0503ebde94a2fd72cf", "stale": false}},
+    "matches": [],
+    "diagnostics": []
+  },
+  "limitations": []
+}

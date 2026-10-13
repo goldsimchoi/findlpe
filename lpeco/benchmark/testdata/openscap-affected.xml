@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oval_results schema_version="1" distribution="ubuntu" release="22.04" package="demo" version="1.0-1" scan_status="complete" result_semantics="affected-fixed">
+  <results><system><definitions>
+    <definition definition_id="oval:com.ubuntu.jammy:def:20994001" result="true"/>
+  </definitions></system></results>
+</oval_results>

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "scan_status": "complete",
+  "results": [
+    {
+      "source": {"path": "fixture.lock", "type": "lockfile"},
+      "packages": [
+        {
+          "package": {"name": "demo", "version": "1.0-2", "ecosystem": "Ubuntu:22.04"},
+          "benchmark_state": "fixed",
+          "vulnerabilities": []
+        }
+      ]
+    }
+  ]
+}

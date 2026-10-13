@@ -1,0 +1,105 @@
+{
+  "schema_version": 2,
+  "session": {
+    "schema_version": 2,
+    "id": "benchmark-fixture",
+    "status": "complete",
+    "transport_kind": "ssh",
+    "profile": {
+      "distribution": {
+        "id": "ubuntu",
+        "version_id": "22.04",
+        "version_codename": "jammy",
+        "channel": "standard",
+        "package_architecture": "amd64"
+      }
+    },
+    "checkpoint": {},
+    "vulnerability": {
+      "mode": "auto",
+      "status": "complete",
+      "provider": "ubuntu",
+      "selected_release": "22.04",
+      "selected_codename": "jammy",
+      "selected_channel": "standard",
+      "selected_architecture": "amd64",
+      "snapshot": {
+        "provider": "ubuntu",
+        "schema_version": 1,
+        "digest": "d610988e192438d45a99d151296eaad4a3c3e9cbb20729a7041d6d4bf4c8ba64",
+        "stale": false,
+        "impact_catalog_digest": "e989f283b88336525c314a4898ceaae909009d71fe459c0503ebde94a2fd72cf"
+      }
+    }
+  },
+  "facts": [],
+  "candidates": [
+    {
+      "id": "candidate-known",
+      "rule_id": "vulnerability.known-privilege-path",
+      "category": "known-vulnerability",
+      "priority": "P1",
+      "confidence": "high",
+      "current_principal": {},
+      "target_principal": {},
+      "path_nodes": [],
+      "evidence_ids": [],
+      "related_match_ids": ["match-demo"],
+      "missing_facts": [],
+      "validation_status": "read_only",
+      "summary": "reviewed fixture path"
+    }
+  ],
+  "evidence": [],
+  "graph": {},
+  "graph_diagnostics": [],
+  "rule_diagnostics": [],
+  "known_vulnerabilities": {
+    "coverage": {
+      "mode": "auto",
+      "status": "complete",
+      "provider": "ubuntu",
+      "selected_release": "22.04",
+      "selected_codename": "jammy",
+      "selected_channel": "standard",
+      "selected_architecture": "amd64",
+      "snapshot": {
+        "provider": "ubuntu",
+        "schema_version": 1,
+        "digest": "d610988e192438d45a99d151296eaad4a3c3e9cbb20729a7041d6d4bf4c8ba64",
+        "stale": false,
+        "impact_catalog_digest": "e989f283b88336525c314a4898ceaae909009d71fe459c0503ebde94a2fd72cf"
+      }
+    },
+    "matches": [
+      {
+        "id": "match-demo",
+        "provider": "ubuntu",
+        "snapshot_digest": "d610988e192438d45a99d151296eaad4a3c3e9cbb20729a7041d6d4bf4c8ba64",
+        "distribution_id": "ubuntu",
+        "release": "22.04",
+        "codename": "jammy",
+        "channel": "standard",
+        "architecture": "amd64",
+        "binary_package": "demo",
+        "binary_architecture": "amd64",
+        "binary_version": {"raw": "1.0-1", "valid": true},
+        "source_package": "demo-source",
+        "source_version": {"raw": "1.0-1", "valid": true},
+        "advisory_id": "CVE-2099-4001",
+        "cve_ids": ["CVE-2099-4001"],
+        "usn_ids": [],
+        "official_references": ["https://ubuntu.com/security/CVE-2099-4001"],
+        "state": "affected",
+        "reason": "exact version is before the fixed boundary",
+        "withdrawn": false,
+        "kernel": false,
+        "target_evidence_ids": [],
+        "missing_facts": [],
+        "confidence": "high"
+      }
+    ],
+    "diagnostics": []
+  },
+  "limitations": []
+}
