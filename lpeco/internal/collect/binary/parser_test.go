@@ -132,31 +132,7 @@ func privilegedByPath(t *testing.T, values []PrivilegedBinaryFact, path string) 
 	return PrivilegedBinaryFact{}
 }
 
-func TestPackageOwnershipParsersAndUnknownManager(t *testing.T) {
-	tests := []struct {
-		manager string
-		input   string
-		owned   bool
-		name    string
-	}{
-		{manager: "dpkg", input: "demo-tools: /usr/bin/demo\n", owned: true, name: "demo-tools"},
-		{manager: "rpm", input: "demo-tools-1.0-1.x86_64\n", owned: true, name: "demo-tools-1.0-1.x86_64"},
-		{manager: "apk", input: "/usr/bin/demo is owned by demo-tools-1.0-r0\n", owned: true, name: "demo-tools-1.0-r0"},
-		{manager: "unknown", input: "", owned: false},
-	}
-	for _, tt := range tests {
-		got := ParsePackageOwnership("/usr/bin/demo", tt.manager, []byte(tt.input), "e-pkg")
-		if got.Owned != tt.owned || got.Package != tt.name || len(got.EvidenceIDs) == 0 {
-			t.Fatalf("%s ownership = %#v", tt.manager, got)
-		}
-	}
-	framed := ParsePackageProbe("/usr/bin/demo", []byte("LPECO_PACKAGE_V1\nMANAGER\trpm\ndemo-tools-1.0-1.x86_64\n"), "e-pkg")
-	if !framed.Owned || framed.Manager != "rpm" || framed.Package != "demo-tools-1.0-1.x86_64" {
-		t.Fatalf("framed package ownership = %#v", framed)
-	}
-}
-
-func TestTargetedBinaryProbesTreatExpectedNegativeResultsAsComplete(t *testing.T) {
+func TestTargetedELFProbeTreatsExpectedNegativeResultAsComplete(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "script")
 	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -167,8 +143,7 @@ func TestTargetedBinaryProbesTreatExpectedNegativeResultsAsComplete(t *testing.T
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{
-		"readelf":    "#!/bin/sh\nexit 1\n",
-		"dpkg-query": "#!/bin/sh\nexit 1\n",
+		"readelf": "#!/bin/sh\nexit 1\n",
 	} {
 		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
@@ -185,18 +160,6 @@ func TestTargetedBinaryProbesTreatExpectedNegativeResultsAsComplete(t *testing.T
 	dependencies, diagnostics := ParseELF(target, elfOutput, "e-script")
 	if len(diagnostics) != 0 || len(dependencies) != 1 || dependencies[0].Kind != "script" {
 		t.Fatalf("script dependencies = %#v, diagnostics = %#v", dependencies, diagnostics)
-	}
-
-	packageCommand := PackageDefinition(target).Variants[0].Command
-	packageProcess := exec.Command("sh", append([]string{"-c", packageCommand.Script, "lpeco"}, packageCommand.Args...)...)
-	packageProcess.Env = append(os.Environ(), "PATH="+fakeBin+":/usr/bin:/bin")
-	packageOutput, err := packageProcess.CombinedOutput()
-	if err != nil {
-		t.Fatalf("unowned package probe should be complete: %v\n%s", err, packageOutput)
-	}
-	ownership := ParsePackageProbe(target, packageOutput, "e-unowned")
-	if ownership.Owned || ownership.Manager != "dpkg" {
-		t.Fatalf("unowned package fact = %#v", ownership)
 	}
 }
 
@@ -244,6 +207,22 @@ func TestCollectorPlansWalkFromDiscoveredMounts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(roots, []string{"/", "/srv"}) {
 		t.Fatalf("collector walk roots = %#v", roots)
+	}
+}
+
+func TestCollectorLeavesPackageOwnershipToPackageInfoCollector(t *testing.T) {
+	definitions := (Collector{WalkOptions: WalkOptions{Limit: 17}}).Plan(model.HostProfile{}, collect.Discovery{ReferencedPaths: []string{"/usr/bin/demo"}})
+	foundELF := false
+	for _, definition := range definitions {
+		if definition.Parser == "package-ownership" {
+			t.Fatalf("binary collector still planned package ownership: %#v", definition)
+		}
+		if definition.Parser == "elf-text" {
+			foundELF = true
+		}
+	}
+	if !foundELF {
+		t.Fatal("binary collector stopped planning ELF inspection")
 	}
 }
 

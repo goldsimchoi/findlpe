@@ -15,9 +15,11 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/normalone/lpeco/internal/adapter"
 	binarycollect "github.com/normalone/lpeco/internal/collect/binary"
 	containercollect "github.com/normalone/lpeco/internal/collect/container"
 	contextcollect "github.com/normalone/lpeco/internal/collect/context"
+	packagecollect "github.com/normalone/lpeco/internal/collect/packageinfo"
 	"github.com/normalone/lpeco/internal/collect/path"
 	processcollect "github.com/normalone/lpeco/internal/collect/process"
 	schedulercollect "github.com/normalone/lpeco/internal/collect/scheduler"
@@ -83,7 +85,6 @@ func TestTargetPersistentStateUnchanged(t *testing.T) {
 		schedulercollect.Definition(),
 		binarycollect.SudoersDefinition(),
 		binarycollect.PrivilegedDefinition(root, 100),
-		binarycollect.PackageDefinition(target),
 		containercollect.SocketDefinition(),
 		systemdcollect.ShowDefinition("system"),
 		systemdcollect.ShowDefinition("user"),
@@ -91,6 +92,11 @@ func TestTargetPersistentStateUnchanged(t *testing.T) {
 		path.ACLDefinition(target),
 		path.MountInfoDefinition(),
 	)
+	packageCollector := packagecollect.Collector{MaxItems: packagecollect.DefaultMaxItems}
+	ownershipPlan := packageCollector.PlanOwnership(model.HostProfile{}, []string{target}, adapter.Capabilities{MaxCommandBytes: 64 * 1024, MaxOutputBytes: 4 * 1024 * 1024})
+	metadataPlan := packageCollector.PlanMetadata(model.HostProfile{}, []packagecollect.Request{{Manager: "dpkg", Package: "lpeco-fixture-nonexistent"}}, adapter.Capabilities{MaxCommandBytes: 64 * 1024, MaxOutputBytes: 4 * 1024 * 1024})
+	definitions = append(definitions, ownershipPlan.Definitions...)
+	definitions = append(definitions, metadataPlan.Definitions...)
 	if _, err := exec.LookPath("objdump"); err == nil {
 		definitions = append(definitions, binarycollect.ELFDefinition(target))
 	}

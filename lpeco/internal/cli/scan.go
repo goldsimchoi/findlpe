@@ -19,6 +19,7 @@ import (
 	binarycollect "github.com/normalone/lpeco/internal/collect/binary"
 	containercollect "github.com/normalone/lpeco/internal/collect/container"
 	contextcollect "github.com/normalone/lpeco/internal/collect/context"
+	packagecollect "github.com/normalone/lpeco/internal/collect/packageinfo"
 	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	processcollect "github.com/normalone/lpeco/internal/collect/process"
 	schedulercollect "github.com/normalone/lpeco/internal/collect/scheduler"
@@ -197,6 +198,7 @@ func configuredCollectors(options CommonOptions) []collect.Collector {
 	return []collect.Collector{
 		contextcollect.Collector{}, processcollect.Collector{}, systemdcollect.Collector{}, pathcollect.Collector{}, schedulercollect.Collector{},
 		binarycollect.Collector{WalkOptions: binarycollect.WalkOptions{Roots: roots, Excludes: append([]string(nil), options.Excludes...), Limit: 10000}},
+		packagecollect.Collector{MaxItems: packagecollect.DefaultMaxItems},
 		containercollect.Collector{},
 	}
 }

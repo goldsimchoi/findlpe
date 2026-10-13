@@ -98,22 +98,6 @@ _lpeco_magic=$(dd if="$1" bs=4 count=1 2>/dev/null | od -An -v -tx1 | tr -d ' \n
 [ "$_lpeco_magic" != 7f454c46 ] || exit 75
 exit 0`
 
-const packageScript = `printf 'LPECO_PACKAGE_V1\nMANAGER\t%s\n' "$1"
-_lpeco_status=0
-case "$1" in
-  dpkg) dpkg-query -S -- "$2" 2>/dev/null || _lpeco_status=$? ;;
-  rpm) rpm -qf -- "$2" 2>/dev/null || _lpeco_status=$? ;;
-  apk) apk info --who-owns -- "$2" 2>/dev/null || _lpeco_status=$? ;;
-  *) exit 64 ;;
-esac
-case "$_lpeco_status" in
-  0) ;;
-  1) printf 'NOT_OWNED\n' ;;
-  *) exit "$_lpeco_status" ;;
-esac`
-
-const packageUnknownScript = `printf 'LPECO_PACKAGE_V1\nMANAGER\tunknown\npackage manager unavailable\n'`
-
 func PrivilegedDefinition(root string, limit int) probe.Definition {
 	return PrivilegedDefinitionWithExcludes(root, nil, limit)
 }
@@ -146,19 +130,6 @@ func ELFDefinition(path string) probe.Definition {
 			{ID: "objdump", Command: adapter.Command{Script: elfObjdumpScript, Args: []string{path}}, Requirements: []probe.Requirement{probe.CommandRequirement("objdump")}},
 		},
 		Timeout: 10 * time.Second, MaxOutput: 2 * 1024 * 1024, Produces: []string{"binary_dependency"}, Idempotent: true,
-	}
-}
-
-func PackageDefinition(path string) probe.Definition {
-	return probe.Definition{
-		ID: "binary.package." + stableSuffix(path), Collector: "binary", Parser: "package-ownership", RedactionPolicy: "paths", SafetyClass: model.PassiveRead,
-		Variants: []probe.Variant{
-			{ID: "dpkg", Command: adapter.Command{Script: packageScript, Args: []string{"dpkg", path}}, Requirements: []probe.Requirement{probe.CommandRequirement("dpkg-query")}},
-			{ID: "rpm", Command: adapter.Command{Script: packageScript, Args: []string{"rpm", path}}, Requirements: []probe.Requirement{probe.CommandRequirement("rpm")}},
-			{ID: "apk", Command: adapter.Command{Script: packageScript, Args: []string{"apk", path}}, Requirements: []probe.Requirement{probe.CommandRequirement("apk")}},
-			{ID: "unknown", Command: adapter.Command{Script: packageUnknownScript}},
-		},
-		Timeout: 10 * time.Second, MaxOutput: 512 * 1024, Produces: []string{"package_ownership"}, Idempotent: true,
 	}
 }
 
@@ -365,7 +336,7 @@ func (collector Collector) Plan(_ model.HostProfile, discovery collect.Discovery
 	sort.Strings(paths)
 	paths = unique(paths)
 	for _, path := range paths {
-		definitions = append(definitions, ELFDefinition(path), PackageDefinition(path))
+		definitions = append(definitions, ELFDefinition(path))
 	}
 	return definitions
 }
@@ -383,10 +354,6 @@ func (Collector) Parse(definition probe.Definition, result adapter.ExecResult, e
 		path := firstCommandPath(definition)
 		values, _ := ParseELF(path, result.Stdout, evidenceID)
 		return marshalFacts("binary_dependency", values, evidenceID)
-	case "package-ownership":
-		path := firstCommandPath(definition)
-		value := ParsePackageProbe(path, result.Stdout, evidenceID)
-		return marshalFacts("package_ownership", []PackageOwnershipFact{value}, evidenceID)
 	default:
 		return nil, fmt.Errorf("unsupported binary parser %q", definition.Parser)
 	}

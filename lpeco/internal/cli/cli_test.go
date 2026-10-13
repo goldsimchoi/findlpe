@@ -2,11 +2,24 @@ package cli
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/normalone/lpeco/internal/adapter/raw"
 )
+
+func TestConfiguredCollectorsRegisterBoundedPackageInfoAfterBinary(t *testing.T) {
+	collectors := configuredCollectors(CommonOptions{})
+	ids := make([]string, 0, len(collectors))
+	for _, collector := range collectors {
+		ids = append(ids, collector.ID())
+	}
+	want := []string{"context", "process", "systemd", "path", "scheduler", "binary", "packageinfo", "container"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("configured collector order = %#v, want %#v", ids, want)
+	}
+}
 
 func TestParseRejectsPublicRawBindWithoutExplicitGate(t *testing.T) {
 	_, err := Parse([]string{"listen", "raw", "--bind", "0.0.0.0:4444"})

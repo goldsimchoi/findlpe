@@ -25,6 +25,18 @@ import (
 	storepkg "github.com/normalone/lpeco/internal/store"
 )
 
+func TestDefaultCollectorsRegisterPackageInfoAfterBinary(t *testing.T) {
+	collectors := defaultCollectors()
+	ids := make([]string, 0, len(collectors))
+	for _, collector := range collectors {
+		ids = append(ids, collector.ID())
+	}
+	want := []string{"context", "process", "systemd", "path", "scheduler", "binary", "packageinfo", "container"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("default collector order = %#v, want %#v", ids, want)
+	}
+}
+
 func TestRunOrdersAdaptivePhasesAndExpandsOnlyReferencedPaths(t *testing.T) {
 	var pathDiscovery collect.Discovery
 	collectors := []collect.Collector{
