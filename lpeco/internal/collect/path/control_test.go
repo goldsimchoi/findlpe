@@ -82,7 +82,7 @@ func TestEvaluateControlMountExecutionSemantics(t *testing.T) {
 }
 
 func controlObservationSet(stats ...StatObservation) ObservationSet {
-	set := ObservationSet{Stats: groupStats(stats), ACLs: make(map[string]ACLObservation), Mounts: []MountObservation{{MountPoint: "/", EvidenceIDs: []string{"e-mount"}}}}
+	set := ObservationSet{Stats: groupStats(stats), ACLs: make(map[string]ACLObservation), Mounts: []MountObservation{{MountPoint: "/", EvidenceIDs: []string{"e-mount"}}}, MountInventoryComplete: true}
 	for _, stat := range stats {
 		set.ACLs[stat.Path] = ACLObservation{Path: stat.Path, Status: ObservationComplete, EvidenceIDs: []string{"e-acl"}}
 	}

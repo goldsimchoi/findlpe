@@ -117,7 +117,10 @@ func (Collector) Parse(definition probe.Definition, result adapter.ExecResult, e
 		values, _ := ParseACL(result.Stdout, evidenceID)
 		return pathFacts("path_acl", values, evidenceID)
 	case "mountinfo":
-		values, _ := ParseMountInfo(result.Stdout, evidenceID)
+		values, diagnostics := ParseMountInfo(result.Stdout, evidenceID)
+		if len(diagnostics) > 0 {
+			return nil, fmt.Errorf("parse mountinfo: %s (%d diagnostics)", diagnostics[0].Code, len(diagnostics))
+		}
 		return pathFacts("mount", values, evidenceID)
 	default:
 		return nil, fmt.Errorf("unsupported path parser %q", definition.Parser)

@@ -85,6 +85,11 @@ func TestNonSystemdFallbackIntegration(t *testing.T) {
 	})
 	pathCollector := pathcollect.Collector{}
 	mountFacts, _ := pathCollector.Parse(pathcollect.MountInfoDefinition(), adapter.ExecResult{Stdout: []byte("36 25 0:32 / / rw,relatime - ext4 /dev/vda1 rw\n"), Status: model.ProbeComplete}, "e-mount")
+	for index := range mountFacts {
+		// Direct collector parsing bypasses the orchestrator's observation
+		// annotation. Mirror the complete probe status used in production.
+		mountFacts[index].ObservationStatus = model.ProbeComplete
+	}
 	statFacts, _ := pathCollector.Parse(pathcollect.StatDefinition("/"), adapter.ExecResult{Stdout: statTranscript, Status: model.ProbeComplete}, "e-stat")
 	aclFacts, _ := pathCollector.Parse(pathcollect.ACLDefinition("/"), adapter.ExecResult{Stdout: aclTranscript, Status: model.ProbeComplete}, "e-acl")
 	facts := append([]model.Fact{}, contextFacts...)

@@ -53,17 +53,41 @@ func parseFrameWithProgress(source io.Reader, nonce string, maxOutput int, progr
 			continue
 		}
 
-		exitText, err := reader.ReadString(0x1f)
+		exitCode, err := readExitStatus(reader)
 		if err != nil {
-			return result, ErrMissingEnd
-		}
-		exitText = exitText[:len(exitText)-1]
-		exitCode, err := strconv.Atoi(exitText)
-		if err != nil || exitCode < 0 || exitCode > 255 {
-			return result, fmt.Errorf("%w: %q", ErrMalformedExit, exitText)
+			return result, err
 		}
 		result.ExitCode = exitCode
 		return result, nil
+	}
+}
+
+func readExitStatus(reader *bufio.Reader) (int, error) {
+	var digits [3]byte
+	length := 0
+	for {
+		value, err := reader.ReadByte()
+		if err != nil {
+			if err == io.EOF {
+				return 0, ErrMissingEnd
+			}
+			return 0, fmt.Errorf("%w: %v", ErrMissingEnd, err)
+		}
+		if value == 0x1f {
+			if length == 0 {
+				return 0, ErrMalformedExit
+			}
+			exitCode, err := strconv.Atoi(string(digits[:length]))
+			if err != nil || exitCode > 255 {
+				return 0, ErrMalformedExit
+			}
+			return exitCode, nil
+		}
+		if value < '0' || value > '9' || length == len(digits) {
+			return 0, ErrMalformedExit
+		}
+		digits[length] = value
+		length++
 	}
 }
 

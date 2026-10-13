@@ -30,9 +30,14 @@ type graphBuilder struct {
 	currentPrincipal model.Principal
 	stats            map[string][]pathcollect.StatObservation
 	acls             map[string]pathcollect.ACLObservation
-	mounts           []pathcollect.MountObservation
+	mounts           []mountPrerequisite
 	unitExecVars     map[string][]string
 	unitSimpleExec   map[string]bool
+}
+
+type mountPrerequisite struct {
+	observation pathcollect.MountObservation
+	fact        model.Fact
 }
 
 // Build converts normalized collector facts into a queryable graph. Malformed
@@ -133,7 +138,7 @@ func (b *graphBuilder) collectPrerequisite(fact model.Fact) {
 		var value pathcollect.MountObservation
 		if b.decode(fact, &value) && value.MountPoint != "" {
 			value.EvidenceIDs = mergeStrings(value.EvidenceIDs, fact.EvidenceIDs)
-			b.mounts = append(b.mounts, value)
+			b.mounts = append(b.mounts, mountPrerequisite{observation: value, fact: fact})
 		}
 	}
 }
@@ -533,31 +538,63 @@ func (b *graphBuilder) addAdminSocket(fact model.Fact) {
 
 func (b *graphBuilder) addFilesystemRelationships() {
 	sort.Slice(b.mounts, func(i, j int) bool {
-		if b.mounts[i].MountPoint != b.mounts[j].MountPoint {
-			return b.mounts[i].MountPoint < b.mounts[j].MountPoint
+		left, right := b.mounts[i], b.mounts[j]
+		if left.observation.MountPoint != right.observation.MountPoint {
+			return left.observation.MountPoint < right.observation.MountPoint
 		}
-		return b.mounts[i].ID < b.mounts[j].ID
+		if left.observation.ID != right.observation.ID {
+			return left.observation.ID < right.observation.ID
+		}
+		return factSortKey(left.fact) < factSortKey(right.fact)
 	})
-	mountRefs := make(map[int]model.NodeRef)
-	for _, mount := range b.mounts {
-		fact := model.Fact{Kind: "mount", SourceCollector: "path", EvidenceIDs: mount.EvidenceIDs, Confidence: model.ConfidenceHigh}
-		mountRefs[mount.ID] = b.addNode(fact, NodeSpec{Key: fmt.Sprintf("%d:%s", mount.ID, mount.MountPoint), Kind: model.NodeMount, Label: mount.MountPoint,
-			SourceCollector: "path", EvidenceIDs: mount.EvidenceIDs, Confidence: model.ConfidenceHigh, Attributes: marshalAttributes(mount)})
+	mountValues := make([]pathcollect.MountObservation, 0, len(b.mounts))
+	mountRefs := make(map[string]model.NodeRef)
+	mountEvidence := make(map[string][]string)
+	mountConfidence := make(map[string]model.Confidence)
+	inventoryComplete := len(b.mounts) > 0
+	var inventoryEvidence []string
+	var inventoryMissing []string
+	for _, prerequisite := range b.mounts {
+		mount := prerequisite.observation
+		fact := prerequisite.fact
+		confidence := normalizeConfidence(fact.Confidence)
+		key := fmt.Sprintf("%d:%s", mount.ID, mount.MountPoint)
+		mountValues = append(mountValues, mount)
+		mountRefs[key] = b.addNode(fact, NodeSpec{Key: key, Kind: model.NodeMount, Label: mount.MountPoint,
+			SourceCollector: fact.SourceCollector, EvidenceIDs: mount.EvidenceIDs, Confidence: confidence, Attributes: marshalAttributes(mount)})
+		mountEvidence[key] = mergeStrings(mountEvidence[key], mount.EvidenceIDs)
+		if existing, ok := mountConfidence[key]; ok {
+			mountConfidence[key] = weakerConfidence(existing, confidence)
+		} else {
+			mountConfidence[key] = confidence
+		}
+		inventoryEvidence = mergeStrings(inventoryEvidence, mount.EvidenceIDs)
+		inventoryMissing = mergeStrings(inventoryMissing, fact.MissingFacts)
+		if fact.ObservationStatus != model.ProbeComplete || confidence != model.ConfidenceHigh || len(fact.MissingFacts) > 0 {
+			inventoryComplete = false
+		}
+	}
+	if !inventoryComplete && len(inventoryMissing) == 0 {
+		inventoryMissing = []string{"mount inventory incomplete"}
 	}
 	paths := make([]string, 0, len(b.pathRefs))
 	for target := range b.pathRefs {
 		paths = append(paths, target)
 	}
 	sort.Strings(paths)
-	observations := pathcollect.ObservationSet{Stats: b.stats, ACLs: b.acls, Mounts: b.mounts}
+	observations := pathcollect.ObservationSet{
+		Stats: b.stats, ACLs: b.acls, Mounts: mountValues, MountInventoryComplete: inventoryComplete,
+		MountInventoryEvidenceIDs: inventoryEvidence, MountInventoryMissing: inventoryMissing,
+	}
 	current, hasCurrent := b.graph.CurrentPrincipal()
 	for _, target := range paths {
 		refs := b.pathRefs[target]
-		if mount, ok := pathcollect.MountForPath(target, b.mounts); ok {
-			mountRef := mountRefs[mount.ID]
+		if mount, ok := pathcollect.MountForPath(target, mountValues); ok {
+			key := fmt.Sprintf("%d:%s", mount.ID, mount.MountPoint)
+			mountRef := mountRefs[key]
 			for _, ref := range refs {
-				fact := model.Fact{Kind: "mount", SourceCollector: "path", EvidenceIDs: mount.EvidenceIDs, Confidence: model.ConfidenceHigh}
-				b.addEdge(fact, EdgeSpec{Kind: model.EdgeLocatedOn, From: ref, To: mountRef, SourceCollector: "path", EvidenceIDs: mount.EvidenceIDs, Confidence: model.ConfidenceHigh})
+				fact := model.Fact{Kind: "mount", SourceCollector: "path", EvidenceIDs: mountEvidence[key], Confidence: mountConfidence[key]}
+				b.addEdge(fact, EdgeSpec{Kind: model.EdgeLocatedOn, From: ref, To: mountRef, SourceCollector: "path", EvidenceIDs: mountEvidence[key], Confidence: mountConfidence[key]})
 			}
 		}
 		if !hasCurrent || !filepath.IsAbs(target) {

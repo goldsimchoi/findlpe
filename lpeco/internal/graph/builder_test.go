@@ -6,11 +6,45 @@ import (
 	"testing"
 
 	"github.com/normalone/lpeco/internal/collect/context"
+	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	"github.com/normalone/lpeco/internal/collect/process"
 	"github.com/normalone/lpeco/internal/collect/systemd"
 	"github.com/normalone/lpeco/internal/model"
 	"github.com/normalone/lpeco/internal/systemdunit"
 )
+
+func TestGraphDoesNotGrantPathControlFromIncompleteMountInventory(t *testing.T) {
+	facts := []model.Fact{
+		makeFact(t, "identity", "context", "e-identity", model.ConfidenceHigh, context.IdentityFact{UIDs: [4]int{1000, 1000, 1000, 1000}, GIDs: [4]int{1000, 1000, 1000, 1000}}),
+		makeFact(t, "process", "process", "e-process", model.ConfidenceHigh, process.ProcessFact{PID: 42, StartTime: 100, Name: "demo", Executable: "/srv/app/tool", UIDs: [4]int{1000, 1000, 1000, 1000}, GIDs: [4]int{1000, 1000, 1000, 1000}, EvidenceIDs: []string{"e-process"}, Confidence: model.ConfidenceHigh}),
+	}
+	for index, observation := range []pathcollect.StatObservation{
+		{Path: "/", Device: 1, Inode: 1, Mode: 0o755, UID: 0, GID: 0, Kind: pathcollect.FileDirectory, Status: pathcollect.ObservationComplete, EvidenceIDs: []string{"e-stat"}},
+		{Path: "/srv", Device: 1, Inode: 2, Mode: 0o755, UID: 0, GID: 0, Kind: pathcollect.FileDirectory, Status: pathcollect.ObservationComplete, EvidenceIDs: []string{"e-stat"}},
+		{Path: "/srv/app", Device: 1, Inode: 3, Mode: 0o777, UID: 1000, GID: 1000, Kind: pathcollect.FileDirectory, Status: pathcollect.ObservationComplete, EvidenceIDs: []string{"e-stat"}},
+		{Path: "/srv/app/tool", Device: 1, Inode: 4, Mode: 0o777, UID: 1000, GID: 1000, Kind: pathcollect.FileRegular, Status: pathcollect.ObservationComplete, EvidenceIDs: []string{"e-stat"}},
+	} {
+		facts = append(facts, makeFact(t, "path_stat", "path", "e-stat-"+string(rune('a'+index)), model.ConfidenceHigh, observation))
+		facts = append(facts, makeFact(t, "path_acl", "path", "e-acl-"+string(rune('a'+index)), model.ConfidenceHigh, pathcollect.ACLObservation{Path: observation.Path, Status: pathcollect.ObservationComplete, EvidenceIDs: []string{"e-acl"}}))
+	}
+	mountFact := makeFact(t, "mount", "path", "e-mount", model.ConfidenceMedium, pathcollect.MountObservation{ID: 36, ParentID: 25, MountPoint: "/", EvidenceIDs: []string{"e-mount"}})
+	mountFact.ObservationStatus = model.ProbePartial
+	mountFact.MissingFacts = []string{"malformed child mount record"}
+	facts = append(facts, mountFact)
+
+	built, _ := Build(facts)
+	current, ok := built.CurrentPrincipal()
+	if !ok {
+		t.Fatal("current principal missing")
+	}
+	if edges := built.Outgoing(current, model.EdgeCanWrite); len(edges) != 0 {
+		t.Fatalf("incomplete mount inventory produced CAN_WRITE: %#v", edges)
+	}
+	mounts := built.NodesByKind(model.NodeMount)
+	if len(mounts) != 1 || mounts[0].Confidence != model.ConfidenceMedium {
+		t.Fatalf("mount fact confidence was not preserved: %#v", mounts)
+	}
+}
 
 func TestGraphStableNodeDedupAndDeterministicSerialization(t *testing.T) {
 	identity := context.IdentityFact{UIDs: [4]int{1000, 1000, 1000, 1000}, GIDs: [4]int{1000, 1000, 1000, 1000}, Groups: []int{27, 1000}}

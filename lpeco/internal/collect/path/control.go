@@ -56,6 +56,16 @@ func EvaluateControl(principal model.Principal, resolution Resolution, use UseKi
 		}
 		return assessment
 	}
+	assessment.EvidenceIDs = appendUniqueStrings(assessment.EvidenceIDs, resolution.observations.MountInventoryEvidenceIDs...)
+	if !resolution.observations.MountInventoryComplete {
+		assessment.MissingFacts = append(assessment.MissingFacts, resolution.observations.MountInventoryMissing...)
+		if len(resolution.observations.MountInventoryMissing) == 0 {
+			assessment.MissingFacts = append(assessment.MissingFacts, "mount inventory incomplete")
+		}
+		assessment.EvidenceIDs = uniqueStrings(assessment.EvidenceIDs)
+		assessment.MissingFacts = uniqueStrings(assessment.MissingFacts)
+		return assessment
+	}
 
 	mount, mountKnown := MountForPath(resolution.FinalPath, resolution.observations.Mounts)
 	if !mountKnown {

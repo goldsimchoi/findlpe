@@ -68,12 +68,34 @@ func TestCandidateValidation(t *testing.T) {
 		wantErrSub string
 	}{
 		{
-			name: "P0 cannot have low confidence",
+			name: "P0 cannot have medium confidence",
 			mutate: func(c *Candidate) {
 				c.Priority = PriorityP0
-				c.Confidence = ConfidenceLow
+				c.Confidence = ConfidenceMedium
 			},
 			wantErrSub: "P0",
+		},
+		{
+			name: "P0 cannot have missing facts",
+			mutate: func(c *Candidate) {
+				c.Priority = PriorityP0
+				c.MissingFacts = []string{"trigger unavailable"}
+			},
+			wantErrSub: "P0",
+		},
+		{
+			name: "read-only validation requires high confidence",
+			mutate: func(c *Candidate) {
+				c.Confidence = ConfidenceMedium
+			},
+			wantErrSub: "read-only",
+		},
+		{
+			name: "read-only validation cannot have missing facts",
+			mutate: func(c *Candidate) {
+				c.MissingFacts = []string{"consumer semantics unresolved"}
+			},
+			wantErrSub: "read-only",
 		},
 		{
 			name: "evidence is required",
