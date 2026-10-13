@@ -4,7 +4,7 @@ GOFMT ?= gofmt
 GOVULNCHECK_VERSION ?= v1.9.0
 ACTIONLINT_VERSION ?= v1.7.12
 
-.PHONY: fmt fmt-check vet test test-race test-integration test-vm build \
+.PHONY: fmt fmt-check vet test test-race test-integration test-vm test-benchmark build \
 	test-policy test-governance vulncheck lint-actions verify verify-ci
 
 fmt:
@@ -34,10 +34,14 @@ test-integration:
 test-vm:
 	$(GO) test -tags=vm_integration ./test/integration -run TestDisposableVMFixture -count=1 -v
 
+test-benchmark:
+	$(GO) test ./benchmark/... -count=1
+
 build:
 	mkdir -p bin
 	$(GO) build -trimpath -o bin/lpeco ./cmd/lpeco
 	$(GO) build -trimpath -o bin/lpeco-c2-example ./cmd/lpeco-c2-example
+	$(GO) build -trimpath -o bin/lpeco-bench ./benchmark/cmd/lpeco-bench
 
 test-policy:
 	sh ../.github/scripts/check-pr-policy_test.sh
@@ -54,4 +58,4 @@ lint-actions:
 verify: fmt-check vet test-race build
 	git diff --check
 
-verify-ci: verify test-policy test-governance lint-actions test-integration vulncheck
+verify-ci: verify test-policy test-governance lint-actions test-integration test-benchmark vulncheck

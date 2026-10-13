@@ -18,6 +18,14 @@ targets, and resume pinning. Tests validate those labels and the separate
 benchmark harness consumes the scenario IDs; scanner output is never copied
 back into expected labels.
 
+The independent comparison harness in [`benchmark/`](../benchmark/README.md)
+references this corpus by its reviewed SHA-256. Its manifest pins scenario
+images, tool builds, the advisory snapshot, and the impact catalog. Benchmark
+results are normalized observations only: raw scanner output, advisory prose,
+credentials, and target identifiers are rejected. Optional baseline artifacts
+must be acquired separately in a disposable authorized environment; the test
+suite and `lpeco-bench` do not execute those tools or use the network.
+
 The package-correlation cross-adapter fixture sends the same bounded package
 ownership and metadata requests through ephemeral SSH, raw listener, stdio raw,
 and JSON-RPC C2 transports. It compares semantic package facts, matches,

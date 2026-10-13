@@ -490,7 +490,7 @@ func forbiddenManifestKey(key string) string {
 			return "raw evidence, advisory prose, credentials, and host identifiers are not benchmark metadata"
 		}
 	}
-	if strings.Contains(normalized, "command") && normalized != "disposable_command" {
+	if strings.Contains(normalized, "command") && normalized != "disposable_command" && normalized != "remote_commands" {
 		return "commands are allowed only in disposable_command"
 	}
 	return ""

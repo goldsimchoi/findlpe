@@ -76,6 +76,7 @@ Run the additional gates independently when diagnosing a failure:
 
 ```sh
 make test-integration
+make test-benchmark
 make vulncheck
 ```
 
@@ -84,6 +85,21 @@ and governance checks, workflow linting, integration tests, and the pinned
 vulnerability scan. `make test-vm` remains a separate release gate: it requires
 a prepared disposable image and its explicit guard, and ordinary hosted CI does
 not treat missing VM evidence as success.
+
+## Independent scanner benchmark
+
+The repository includes an offline harness for measuring known-vulnerability
+state and privilege-path results against the hand-authored 18-scenario corpus.
+It can compare LPECO with optional OpenSCAP/Ubuntu OVAL, OSV-Scanner, LinPEAS,
+and Linux Exploit Suggester lanes without passing their output into LPECO. The
+harness never launches a scanner, shell, container, VM, or network client;
+operators acquire pinned artifacts separately in disposable authorized labs.
+
+Build `bin/lpeco-bench` with `make build`, then use its `validate`, `import`, and
+`score` subcommands to validate a pinned manifest, normalize reviewed local
+artifacts, and produce deterministic metrics. Unpinned or ineligible runs are
+refused during aggregate scoring. See [the benchmark guide](benchmark/README.md)
+for the artifact contracts, safety rules, and metric interpretation.
 
 ## Transports
 

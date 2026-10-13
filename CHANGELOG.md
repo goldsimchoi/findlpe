@@ -23,6 +23,10 @@ begin.
   separate coverage, match-only, and P1/P2 privilege-path reporting.
 - Contribution, security, development, and automated repository policy checks
   for long-term maintenance.
+- An offline, reproducible known-vulnerability benchmark with independently
+  authored scenario labels, strict LPECO/OSV-Scanner/OpenSCAP normalization,
+  manual baseline review, deterministic scoring, and explicit safety/resource
+  accounting.
 
 ### Changed
 
