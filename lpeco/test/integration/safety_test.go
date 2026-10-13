@@ -77,6 +77,8 @@ func TestTargetPersistentStateUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := snapshotTree(t, root)
+	processBefore := snapshotProcessIdentity(t, strconv.Itoa(os.Getpid()))
+	managerBefore := snapshotProcessIdentity(t, "1")
 	pid := strconv.Itoa(os.Getpid())
 	definitions := append([]probe.Definition{}, contextcollect.Definitions()...)
 	definitions = append(definitions,
@@ -105,14 +107,72 @@ func TestTargetPersistentStateUnchanged(t *testing.T) {
 			t.Fatalf("probe %s safety = %s", definition.ID, definition.SafetyClass)
 		}
 		variant := definition.Variants[len(definition.Variants)-1]
+		assertNoTargetEgressOrMutation(t, definition.ID, variant.Command.Script)
 		command := exec.Command("sh", append([]string{"-c", variant.Command.Script, "lpeco"}, variant.Command.Args...)...)
 		if _, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("probe %s failed: %v", definition.ID, err)
+		}
+		if current := snapshotTree(t, root); !reflect.DeepEqual(current, before) {
+			t.Fatalf("probe %s changed persistent fixture state\nbefore: %#v\nafter:  %#v", definition.ID, before, current)
+		}
+		if current := snapshotProcessIdentity(t, strconv.Itoa(os.Getpid())); current != processBefore {
+			t.Fatalf("probe %s changed test target process identity: before=%#v after=%#v", definition.ID, processBefore, current)
+		}
+		if current := snapshotProcessIdentity(t, "1"); current != managerBefore {
+			t.Fatalf("probe %s changed service-manager process identity: before=%#v after=%#v", definition.ID, managerBefore, current)
 		}
 	}
 	after := snapshotTree(t, root)
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("persistent fixture state changed\nbefore: %#v\nafter:  %#v", before, after)
+	}
+}
+
+type processIdentitySnapshot struct {
+	PID        string
+	StartTime  string
+	Executable string
+	UID        uint32
+	GID        uint32
+}
+
+func snapshotProcessIdentity(t *testing.T, pid string) processIdentitySnapshot {
+	t.Helper()
+	statBody, err := os.ReadFile(filepath.Join("/proc", pid, "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closing := strings.LastIndex(string(statBody), ") ")
+	if closing < 0 {
+		t.Fatalf("malformed /proc/%s/stat", pid)
+	}
+	fields := strings.Fields(string(statBody)[closing+2:])
+	if len(fields) <= 19 {
+		t.Fatalf("short /proc/%s/stat", pid)
+	}
+	executable, _ := os.Readlink(filepath.Join("/proc", pid, "exe"))
+	info, err := os.Stat(filepath.Join("/proc", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := processIdentitySnapshot{PID: pid, StartTime: fields[19], Executable: executable}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		value.UID, value.GID = stat.Uid, stat.Gid
+	}
+	return value
+}
+
+func assertNoTargetEgressOrMutation(t *testing.T, probeID, script string) {
+	t.Helper()
+	lower := strings.ToLower(script)
+	for _, forbidden := range []string{
+		"curl ", "wget ", "netcat ", "socat ", "ssh ", "ftp ", "/dev/tcp", "/dev/udp",
+		"apt-get ", "apt update", "dnf ", "yum ", "apk add", "pip install",
+		"systemctl start", "systemctl stop", "systemctl restart", "systemctl reload", "systemctl enable", "systemctl disable",
+	} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("probe %s contains target egress or mutation primitive %q", probeID, forbidden)
+		}
 	}
 }
 

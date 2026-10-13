@@ -9,6 +9,24 @@ ephemeral SSH, raw listener, stdio raw, and a JSON-RPC plugin subprocess, then
 parses them with the production collectors and compares candidate meaning rather
 than transport metadata.
 
+Known-vulnerability release ground truth lives in
+`testdata/known-vulnerability/scenarios.json`. Its labels are hand-authored and
+cover the release cases for P1/P2/match-only results, fixed and explicitly
+not-affected packages, Debian epoch/backport ordering, unknown evidence,
+running-kernel identity, database availability/integrity/staleness, unsupported
+targets, and resume pinning. Tests validate those labels and the separate
+benchmark harness consumes the scenario IDs; scanner output is never copied
+back into expected labels.
+
+The package-correlation cross-adapter fixture sends the same bounded package
+ownership and metadata requests through ephemeral SSH, raw listener, stdio raw,
+and JSON-RPC C2 transports. It compares semantic package facts, matches,
+candidates, coverage, and missing facts while ignoring transport-specific
+evidence IDs, then resumes against the exact pinned snapshot and asserts that
+package evidence and match facts are not duplicated. Feed-sync tests use a
+local deterministic HTTP server on the operator side. No integration fixture
+permits target egress or package-repository refresh.
+
 ## Container gate
 
 ```sh
@@ -54,3 +72,12 @@ guest.
 
 Container and VM images contain deliberately writable privileged-consumer
 inputs. Never reuse them outside an isolated test network.
+
+## Schema compatibility
+
+New sessions use report/session schema 2 and can contain provider coverage,
+known-vulnerability matches, and known-vulnerability path candidates as
+separate collections. A schema-2 resume must resolve the exact saved provider,
+snapshot schema/digest, and impact-catalog digest. Schema-1 fixtures remain
+valid legacy input and are reported as `legacy_not_requested`; they are not
+silently upgraded by consulting the current database.

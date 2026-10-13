@@ -5,7 +5,9 @@ authorized security assessments. After you already have an approved SSH,
 reverse-shell/raw-shell, or C2 execution channel, it inventories processes,
 systemd, scheduled jobs, privileged binaries, delegation policy, paths, mounts,
 ACLs, and container-management sockets. It correlates those observations into
-evidence-backed candidates; it does not exploit them.
+evidence-backed candidates. An optional offline Ubuntu database also correlates
+exact installed package versions for graph-selected privileged components; it
+does not exploit them or claim host-wide vulnerability coverage.
 
 ## Authorization and safety boundary
 
@@ -21,9 +23,45 @@ log entries and is skipped unless `--observable-read` is supplied. When enabled,
 the exact observable probe IDs are printed before those probes execute. The
 scheduler has no override for `temporary-artifact` or `state-changing` probes.
 
+## Offline known-vulnerability correlation
+
+Database synchronization is an explicit operator-side action. It contacts only
+the fixed Canonical Ubuntu OSV and VEX endpoints, normalizes the bounded feeds,
+and atomically publishes a content-addressed snapshot under the user cache:
+
+```sh
+./bin/lpeco vuln-db sync --provider ubuntu
+./bin/lpeco vuln-db status
+```
+
+Use `--db-dir <path>` on either command to select another operator-side store.
+`status` performs local integrity validation and reports the digest, age,
+staleness, provider/source times, supported standard releases, record count,
+and reviewed impact-catalog digest without making an HTTP request. There is no
+feed-URL override flag.
+
+New schema-v2 scans default to `--vuln-mode auto`:
+
+- `auto` uses a valid current snapshot for a supported target. A missing DB is
+  `not_run` and an unsupported target is `unsupported`; both leave an otherwise
+  complete deterministic scan successful. Corruption or incomplete package
+  work returns partial exit 3.
+- `off` records `disabled`, performs no vulnerability DB I/O, and sends no
+  package-correlation probes.
+- `required` turns missing, unsupported, corrupt, or incomplete coverage into
+  partial exit 3.
+
+An exact immutable snapshot can be selected with
+`--vuln-db <.../sha256-DIGEST>`. This implies `required` and cannot be combined
+with `off`. Package queries are limited to components already connected to an
+observed privilege boundary; LPECO never inventories every installed package.
+It compares Debian versions exactly and emits affected, fixed, explicitly
+not-affected, or unknown match records. An affected match is not proof that an
+exploit exists or will succeed.
+
 ## Build
 
-Go 1.26 or newer is expected.
+Go 1.26.9 or newer is expected.
 
 ```sh
 make verify
@@ -128,7 +166,11 @@ retain complementary facts from both variants. An unresolved incomplete probe
 leaves the session `interrupted` and the CLI exits 3. A closed raw channel or
 broken transport is left for resume with a newly established connection.
 Re-supply any non-default `--observe`, `--scan-root`, `--exclude`, `--full`, and
-`--observable-read` choices so a resumed plan has the same scope:
+`--observable-read` choices so a resumed plan has the same scope. Schema-v2
+resume resolves the exact snapshot and impact-catalog digest pinned in the
+session; a newer `current.json` cannot change prior results. A missing or
+mismatched pin leaves the session partial without recomputing matches. Schema-v1
+sessions remain `legacy_not_requested` and never gain the phase implicitly:
 
 ```sh
 ./bin/lpeco resume assessment-01 \
@@ -145,7 +187,10 @@ session directory and its `evidence/` directory are mode `0700`; evidence,
 facts, checkpoint metadata, and candidate files are mode `0600`. Raw evidence
 stays there and is referenced by ID and SHA-256. Reports contain redacted typed
 facts, evidence metadata, the derived graph, and graph/rule diagnostics, not raw
-evidence bodies.
+evidence bodies. Schema-v2 output separates deterministic candidates,
+known-vulnerability privilege-path candidates, match-only inventory, and
+provider coverage. “No affected records matched the selected scope” is not a
+claim that the host has no vulnerabilities.
 
 ## How to read a candidate
 
@@ -154,6 +199,12 @@ evidence bodies.
 - `P1`: control and a privilege boundary are supported, but a trigger,
   semantics, or confidence element is incomplete.
 - `P2`: inventory/diagnostic priority where the control chain is not validated.
+
+The known-vulnerability rule is capped at P1. P1 additionally requires an exact
+complete affected match, a different-principal consumer, a reviewed impact
+annotation, an observed affected-use edge, and an existing high-confidence
+current-user interaction allowed by that annotation. Missing impact or
+reachability remains P2; an exact affected running-kernel package is P2 only.
 
 Confidence is separate from priority. Permission denial, truncation, a vanished
 process, an unresolved systemd specifier, or a missing tool is retained as
@@ -170,7 +221,12 @@ validated.
   are used when associating processes to systemd units, but consumers and paths
   can still change between observations.
 - The MVP does not execute exploits, test writes, restart services, interpret
-  arbitrary sudo command semantics, or score kernel CVEs.
+  arbitrary sudo command semantics, search for zero-days, or recommend kernel
+  exploits. Running-kernel package correlation is exact, offline, and P2-only.
+- Ubuntu coverage is limited to reviewed standard 22.04/jammy, 24.04/noble,
+  and 26.04/resolute policy entries in the pinned snapshot. Pro/ESM and
+  unreviewed releases are unsupported rather than guessed. A snapshot becomes
+  stale after seven days but remains usable with an explicit warning.
 - systemd runtime authority and unit-file provenance are collected separately,
   scoped by system/user manager plus manager UID, then reconciled. File fallback
   cannot supply every runtime property; mismatches are diagnostics rather than
@@ -195,6 +251,12 @@ and [fixture guide](docs/fixtures.md).
 | 8 | Every rule has a positive and at least two negative cases; rank covers P0/P1/P2 | `TestAllRulesHavePositiveAndTwoNegatives` |
 | 9 | Persistent target state is unchanged | `TestTargetPersistentStateUnchanged` |
 | 10 | Terminal and JSON reports do not disclose secrets | `TestReportsContainNoSecrets` |
+| 11 | Known-vulnerability phase runs after fallback or fallback skip | `TestRunVulnerabilityModesAndTwoPassCollection`, `TestRunSkipsFallbackForStrongPrimaryUnlessFull` |
+| 12 | Resume accepts only the pinned snapshot/catalog and does not duplicate facts | `TestResumePinsVulnerabilitySnapshotAndDoesNotDuplicateFacts` |
+| 13 | SSH/raw/C2 produce equivalent package, match, candidate, and coverage meaning | `TestKnownVulnerabilityCrossAdapterSemanticEquivalenceAndResume` |
+| 14 | Hand-authored scenario ground truth covers state, tier, kernel, DB, and pinning cases | `TestKnownVulnerabilityGroundTruthManifestCoversReleaseCases` |
+| 15 | Package probes preserve target files and process/service-manager identity and contain no egress primitive | `TestTargetPersistentStateUnchanged` |
+| 16 | Schema-v2 reports separate matches, paths, and coverage and escape hostile terminal data | `TestKnownVulnerabilityJSONIsSeparatedDeterministicAndComplete`, `TestKnownVulnerabilityTerminalEscapesHostileProviderStrings` |
 
 Run `make verify`, `make test-integration`, and—when the prepared disposable
 image is configured—`make test-vm` before a release.

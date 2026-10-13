@@ -97,6 +97,13 @@ arguments. Execute that exact string once through the approved target shell;
 do not concatenate target data, wrap it in a second interpolation layer, or
 silently retry it. Enforce both negotiated limits.
 
+Known-vulnerability correlation does not change protocol version 1.
+Distribution, kernel, package-ownership, and package-metadata checks are
+ordinary `exec` requests with registered passive-read probe IDs. The advisory
+snapshot remains on the operator side: no database bytes are sent through
+`exec`, and the core still never calls the reserved `upload` or `download`
+methods. Adapters need no vulnerability-specific method or capability.
+
 ### `poll`
 
 Request:

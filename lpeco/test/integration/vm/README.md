@@ -35,6 +35,15 @@ session, then verifies that every incomplete checkpoint belongs only to those
 protected environment reads or the user-systemd passive fallback. It continues
 all graph, service-state, and persistent-state assertions after that check.
 
+If known-vulnerability assertions are added to this gate, supply the database
+from a host-side immutable snapshot pinned by digest. The guest must remain
+offline: do not copy the database or helper binaries into it, run package
+updates, install packages, or permit target egress. Record the exact qcow2 image
+digest, Ubuntu release/channel, package fixture versions, snapshot digest, and
+impact-catalog digest with the result so it can be reproduced. Package probes
+must remain passive `dpkg-query`/identity reads covered by the same before/after
+file, process, and service snapshots.
+
 ## Run
 
 ```sh

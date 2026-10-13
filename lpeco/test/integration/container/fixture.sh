@@ -168,7 +168,7 @@ run_scan() {
 
   incomplete_probes=$(awk -F'"' '
     /"probe_id":/ { probe=$4 }
-    /"status":/ && probe != "" && $4 != "complete" { print probe; probe="" }
+    /"status":/ && probe != "" { if ($4 != "complete") print probe; probe="" }
   ' /tmp/lpeco-state/container-fixture/session.json | sort -u)
   printf '%s\n' "$incomplete_probes" | while IFS= read -r probe_id; do
     case "$probe_id" in

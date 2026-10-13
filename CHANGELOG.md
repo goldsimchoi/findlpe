@@ -18,6 +18,9 @@ begin.
   adapter transports with bounded output and cancellation behavior.
 - Resumable sessions, immutable raw evidence references, redacted terminal and
   JSON reports, and integration fixtures for cross-transport behavior.
+- Operator-synchronized, immutable Ubuntu OSV/VEX snapshots and offline exact
+  package-version correlation for graph-selected privileged components, with
+  separate coverage, match-only, and P1/P2 privilege-path reporting.
 - Contribution, security, development, and automated repository policy checks
   for long-term maintenance.
 
@@ -50,3 +53,10 @@ begin.
 - Probe registration enforces read-only safety classes, fixed scripts, bounded
   execution, target-value quoting, report redaction, and restrictive local
   evidence permissions.
+- Vulnerability databases stay on the operator side; targets receive only
+  bounded passive package queries and never receive feeds, uploads, repository
+  refreshes, or target-egress commands. Sync uses fixed Canonical HTTPS sources,
+  bounded archive decoding, atomic content-addressed publication, exact resume
+  pinning, official-reference allowlisting, and terminal control escaping.
+- The minimum Go patch release is 1.26.9, which includes the standard-library
+  fixes required by the repository vulnerability gate.

@@ -89,11 +89,54 @@ command output is capped by the smaller of the adapter claim, `--max-output`,
 and the inverse base64/envelope limit. Adapter shutdown has a deadline; a child
 that ignores close is terminated.
 
+## Offline vulnerability-data boundary
+
+Known-vulnerability correlation keeps the advisory database entirely on the
+operator side. A scan sends only registered `passive-read` probes for
+`/etc/os-release`, `uname`, `dpkg-query -S`, and bounded `dpkg-query -W`
+requests. It does not copy the database or a helper to the target, refresh
+package repositories, install packages, enumerate the complete package
+database, or initiate target-side network traffic. Package queries are limited
+to unique files already selected from observed privileged consumers and the
+packages that own those files. A denied, ambiguous, truncated, or unparsable
+query produces incomplete/unknown coverage, never a clean-host conclusion.
+
+`vuln-db sync` is a separate operator action. Production sync accepts only the
+fixed Canonical OSV and VEX HTTPS endpoints and restricts redirects to HTTPS on
+`security-metadata.canonical.com`. Responses are streamed through bounded XZ
+and tar readers: 256 MiB compressed per feed, 32 MiB per regular entry, 250,000
+entries, and 4 GiB expanded per archive. Absolute/traversing/duplicate paths,
+links, special files, extra streams, trailing archive data, and checksum errors
+are rejected. Publication is atomic and content-addressed; a session pins the
+provider, snapshot schema/digest, and reviewed impact-catalog digest. Resume
+does not fall forward to a newer `current.json`. Tests use only a local HTTP
+fixture for sync.
+
+Canonical publishes these feeds as `.tar.xz`, so operator-side sync uses the
+pinned pure-Go `github.com/ulikunitz/xz v0.5.17` decoder. It is not linked into
+or executed on the target. Dependency review, `go mod verify`, and the existing
+`govulncheck` gate cover it with the rest of the Go dependency graph.
+
+Snapshots are reported stale at seven days but remain deterministic input with
+an explicit warning. Coverage is limited to the supported standard Ubuntu
+release policy embedded in the snapshot and the observed package-selection
+scope. `fixed`, `not_affected`, and “no affected records matched” describe that
+scope only; they are not assertions that the host is free of vulnerabilities.
+
+The bundled `ubuntu-cve-2023-4911-suid-loader-v1` impact annotation was reviewed
+against Canonical's Ubuntu CVE-2023-4911 page and USN-6409-1. It scopes only the
+`glibc`/`libc6` loader relationship, a different-principal target, observed
+`LOADS`, and current-principal `CAN_EXECUTE`. The catalog contains typed gates
+and official references, not advisory prose, exploit instructions, or payloads.
+
 ## Verification
 
 Unit tests fuzz command/frame redaction boundaries and exercise partial data.
 Integration fixtures compare path lists, content hashes, modes, owners, sizes,
 symlink targets, managed process identity, and service state before and after
-scans. The systemd VM runner boots only a temporary overlay and requires an
-explicit disposable-image guard. Destructive fixture setup additionally requires
-an explicit disposable sentinel and a container marker before it can run.
+every registered probe, including package-correlation probes. Static checks
+also reject upload, package-refresh, service-control, and target-egress
+primitives in probe definitions. The systemd VM runner boots only a temporary
+overlay and requires an explicit disposable-image guard. Destructive fixture
+setup additionally requires an explicit disposable sentinel and a container
+marker before it can run.
