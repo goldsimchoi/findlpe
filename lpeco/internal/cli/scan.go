@@ -54,6 +54,8 @@ func Execute(ctx context.Context, arguments []string, stdin io.Reader, stdout, s
 		return ExitUsage
 	}
 	switch configuration.Mode {
+	case ModeVulnDBSync, ModeVulnDBStatus:
+		return executeVulnerabilityDatabase(ctx, configuration, stdout, stderr)
 	case ModeReport:
 		if err := runReport(ctx, configuration, stdout); err != nil {
 			_, _ = fmt.Fprintf(stderr, "lpeco: %s\n", redact.String(err.Error()))
@@ -91,6 +93,7 @@ func executeNewScan(ctx context.Context, configuration Config, _ io.Reader, stdo
 		return ExitOperation
 	}
 	options := scanOptions(configuration, sessionID)
+	options.Vulnerability = resolveNewVulnerability(ctx, configuration.Vulnerability, time.Now().UTC())
 	if configuration.Common.ObservableRead {
 		options.BeforeObservable = func(probes []string) error { return showObservablePreview(stderr, probes, true) }
 	}
@@ -117,12 +120,18 @@ func executeResume(ctx context.Context, configuration Config, stdout, stderr io.
 		_, _ = fmt.Fprintf(stderr, "lpeco: %s\n", redact.String(err.Error()))
 		return ExitOperation
 	}
+	session, err := sessionStore.Load(ctx, configuration.ResumeSessionID)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "lpeco: %s\n", redact.String(err.Error()))
+		return ExitOperation
+	}
 	transport, err := buildTransport(ctx, configuration, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "lpeco: %s\n", redact.String(err.Error()))
 		return ExitOperation
 	}
 	options := scanOptions(configuration, configuration.ResumeSessionID)
+	options.Vulnerability = resolveResumeVulnerability(ctx, configuration.Vulnerability, session, time.Now().UTC())
 	if configuration.Common.ObservableRead {
 		options.BeforeObservable = func(probes []string) error { return showObservablePreview(stderr, probes, true) }
 	}
@@ -187,6 +196,7 @@ func scanOptions(configuration Config, sessionID string) orchestrator.Options {
 		SessionID: sessionID, TransportKind: transportName(configuration), Target: targetName(configuration),
 		Collectors: configuredCollectors(configuration.Common), Full: configuration.Common.Full,
 		ObservableRead: configuration.Common.ObservableRead, ProcessObservation: configuration.Common.Observe,
+		Vulnerability: orchestrator.VulnerabilityInput{Mode: configuration.Vulnerability.Mode, Explicit: configuration.Vulnerability.SnapshotDir != ""},
 	}
 }
 
@@ -271,8 +281,11 @@ func Usage() string {
   lpeco scan bridge --adapter '<command>' [--protocol jsonrpc|raw] [options]
   lpeco resume <session-id> --transport ssh|bridge|raw [transport options]
   lpeco report <session-id> --format terminal|json [--state-dir <path>]
+  lpeco vuln-db sync [--provider ubuntu] [--db-dir <path>]
+  lpeco vuln-db status [--db-dir <path>]
 
 Scans perform read-only collection. Observable reads require --observable-read;
-wildcard raw listeners require --allow-public-bind.
+wildcard raw listeners require --allow-public-bind. Scan and resume accept
+--vuln-mode auto|off|required and --vuln-db <snapshot-dir>.
 `
 }

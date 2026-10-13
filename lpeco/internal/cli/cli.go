@@ -10,17 +10,21 @@ import (
 	"time"
 
 	"github.com/normalone/lpeco/internal/adapter/raw"
+	"github.com/normalone/lpeco/internal/model"
 	"github.com/normalone/lpeco/internal/store"
+	"github.com/normalone/lpeco/internal/vulndb"
 )
 
 type Mode string
 
 const (
-	ModeScanSSH    Mode = "scan-ssh"
-	ModeScanBridge Mode = "scan-bridge"
-	ModeListenRaw  Mode = "listen-raw"
-	ModeResume     Mode = "resume"
-	ModeReport     Mode = "report"
+	ModeScanSSH      Mode = "scan-ssh"
+	ModeScanBridge   Mode = "scan-bridge"
+	ModeListenRaw    Mode = "listen-raw"
+	ModeResume       Mode = "resume"
+	ModeReport       Mode = "report"
+	ModeVulnDBSync   Mode = "vuln-db-sync"
+	ModeVulnDBStatus Mode = "vuln-db-status"
 )
 
 type CommonOptions struct {
@@ -59,6 +63,13 @@ type BridgeOptions struct {
 
 type ReportOptions struct{ Format string }
 
+type VulnerabilityOptions struct {
+	Mode        model.VulnerabilityMode
+	SnapshotDir string
+	DatabaseDir string
+	Provider    string
+}
+
 type Config struct {
 	Mode            Mode
 	Common          CommonOptions
@@ -66,6 +77,7 @@ type Config struct {
 	Raw             RawOptions
 	Bridge          BridgeOptions
 	Report          ReportOptions
+	Vulnerability   VulnerabilityOptions
 	ResumeSessionID string
 	ResumeTransport string
 }
@@ -96,6 +108,8 @@ func Parse(arguments []string) (Config, error) {
 		return parseResume(arguments[1:])
 	case "report":
 		return parseReport(arguments[1:])
+	case "vuln-db":
+		return parseVulnerabilityDatabase(arguments[1:])
 	default:
 		return Config{}, fmt.Errorf("unknown command %q", arguments[0])
 	}
@@ -105,9 +119,10 @@ func parseScanSSH(arguments []string) (Config, error) {
 	if len(arguments) == 0 || strings.HasPrefix(arguments[0], "-") {
 		return Config{}, errors.New("SSH target is required before flags")
 	}
-	configuration := Config{Mode: ModeScanSSH, SSH: SSHOptions{Target: arguments[0]}}
+	configuration := Config{Mode: ModeScanSSH, SSH: SSHOptions{Target: arguments[0]}, Vulnerability: defaultVulnerabilityOptions()}
 	flags := newFlagSet("scan ssh")
 	registerCommon(flags, &configuration.Common)
+	registerVulnerability(flags, &configuration.Vulnerability)
 	registerSSH(flags, &configuration.SSH, false)
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return Config{}, err
@@ -118,13 +133,17 @@ func parseScanSSH(arguments []string) (Config, error) {
 	if err := validateCommon(&configuration.Common); err != nil {
 		return Config{}, err
 	}
+	if err := validateVulnerability(&configuration.Vulnerability); err != nil {
+		return Config{}, err
+	}
 	return configuration, nil
 }
 
 func parseScanBridge(arguments []string) (Config, error) {
-	configuration := Config{Mode: ModeScanBridge, Bridge: BridgeOptions{Protocol: "jsonrpc"}}
+	configuration := Config{Mode: ModeScanBridge, Bridge: BridgeOptions{Protocol: "jsonrpc"}, Vulnerability: defaultVulnerabilityOptions()}
 	flags := newFlagSet("scan bridge")
 	registerCommon(flags, &configuration.Common)
+	registerVulnerability(flags, &configuration.Vulnerability)
 	var command string
 	flags.StringVar(&command, "adapter", "", "adapter process command")
 	flags.StringVar(&configuration.Bridge.Protocol, "protocol", "jsonrpc", "jsonrpc or raw")
@@ -145,13 +164,17 @@ func parseScanBridge(arguments []string) (Config, error) {
 	if err := validateCommon(&configuration.Common); err != nil {
 		return Config{}, err
 	}
+	if err := validateVulnerability(&configuration.Vulnerability); err != nil {
+		return Config{}, err
+	}
 	return configuration, nil
 }
 
 func parseListenRaw(arguments []string) (Config, error) {
-	configuration := Config{Mode: ModeListenRaw}
+	configuration := Config{Mode: ModeListenRaw, Vulnerability: defaultVulnerabilityOptions()}
 	flags := newFlagSet("listen raw")
 	registerCommon(flags, &configuration.Common)
+	registerVulnerability(flags, &configuration.Vulnerability)
 	registerRaw(flags, &configuration.Raw)
 	if err := flags.Parse(arguments); err != nil {
 		return Config{}, err
@@ -165,6 +188,9 @@ func parseListenRaw(arguments []string) (Config, error) {
 	if err := validateCommon(&configuration.Common); err != nil {
 		return Config{}, err
 	}
+	if err := validateVulnerability(&configuration.Vulnerability); err != nil {
+		return Config{}, err
+	}
 	return configuration, nil
 }
 
@@ -172,9 +198,10 @@ func parseResume(arguments []string) (Config, error) {
 	if len(arguments) == 0 || strings.HasPrefix(arguments[0], "-") {
 		return Config{}, errors.New("resume session ID is required before flags")
 	}
-	configuration := Config{Mode: ModeResume, ResumeSessionID: arguments[0], Bridge: BridgeOptions{Protocol: "jsonrpc"}}
+	configuration := Config{Mode: ModeResume, ResumeSessionID: arguments[0], Bridge: BridgeOptions{Protocol: "jsonrpc"}, Vulnerability: defaultVulnerabilityOptions()}
 	flags := newFlagSet("resume")
 	registerCommon(flags, &configuration.Common)
+	registerVulnerability(flags, &configuration.Vulnerability)
 	registerSSH(flags, &configuration.SSH, true)
 	registerRaw(flags, &configuration.Raw)
 	var command string
@@ -212,6 +239,44 @@ func parseResume(arguments []string) (Config, error) {
 	if err := validateCommon(&configuration.Common); err != nil {
 		return Config{}, err
 	}
+	if err := validateVulnerability(&configuration.Vulnerability); err != nil {
+		return Config{}, err
+	}
+	return configuration, nil
+}
+
+func parseVulnerabilityDatabase(arguments []string) (Config, error) {
+	if len(arguments) == 0 {
+		return Config{}, errors.New("vuln-db subcommand is required")
+	}
+	configuration := Config{Vulnerability: VulnerabilityOptions{Provider: "ubuntu"}}
+	flags := newFlagSet("vuln-db " + arguments[0])
+	flags.StringVar(&configuration.Vulnerability.DatabaseDir, "db-dir", "", "vulnerability database directory")
+	switch arguments[0] {
+	case "sync":
+		configuration.Mode = ModeVulnDBSync
+		flags.StringVar(&configuration.Vulnerability.Provider, "provider", "ubuntu", "vulnerability provider")
+	case "status":
+		configuration.Mode = ModeVulnDBStatus
+	default:
+		return Config{}, fmt.Errorf("unsupported vuln-db subcommand %q", arguments[0])
+	}
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return Config{}, err
+	}
+	if flags.NArg() != 0 {
+		return Config{}, errors.New("unexpected vuln-db positional arguments")
+	}
+	if configuration.Mode == ModeVulnDBSync && configuration.Vulnerability.Provider != "ubuntu" {
+		return Config{}, fmt.Errorf("unsupported vulnerability provider %q", configuration.Vulnerability.Provider)
+	}
+	if configuration.Vulnerability.DatabaseDir == "" {
+		directory, err := vulndb.DefaultDir()
+		if err != nil {
+			return Config{}, err
+		}
+		configuration.Vulnerability.DatabaseDir = directory
+	}
 	return configuration, nil
 }
 
@@ -247,6 +312,50 @@ func registerCommon(flags *flag.FlagSet, options *CommonOptions) {
 	flags.Var((*stringList)(&options.ScanRoots), "scan-root", "fallback filesystem root (repeatable)")
 	flags.Var((*stringList)(&options.Excludes), "exclude", "fallback filesystem exclusion (repeatable)")
 	flags.IntVar(&options.MaxOutput, "max-output", 4*1024*1024, "maximum bytes captured per command")
+}
+
+func defaultVulnerabilityOptions() VulnerabilityOptions {
+	return VulnerabilityOptions{Mode: model.VulnerabilityModeAuto}
+}
+
+func registerVulnerability(flags *flag.FlagSet, options *VulnerabilityOptions) {
+	flags.Var(vulnerabilityModeFlag{destination: &options.Mode}, "vuln-mode", "auto, off, or required")
+	flags.StringVar(&options.SnapshotDir, "vuln-db", "", "exact immutable vulnerability snapshot directory")
+}
+
+func validateVulnerability(options *VulnerabilityOptions) error {
+	switch options.Mode {
+	case model.VulnerabilityModeAuto, model.VulnerabilityModeOff, model.VulnerabilityModeRequired:
+	default:
+		return fmt.Errorf("unsupported vulnerability mode %q", options.Mode)
+	}
+	if options.SnapshotDir != "" {
+		if options.Mode == model.VulnerabilityModeOff {
+			return errors.New("--vuln-db cannot be combined with --vuln-mode off")
+		}
+		options.Mode = model.VulnerabilityModeRequired
+	}
+	return nil
+}
+
+type vulnerabilityModeFlag struct{ destination *model.VulnerabilityMode }
+
+func (value vulnerabilityModeFlag) String() string {
+	if value.destination == nil {
+		return ""
+	}
+	return string(*value.destination)
+}
+
+func (value vulnerabilityModeFlag) Set(input string) error {
+	mode := model.VulnerabilityMode(input)
+	switch mode {
+	case model.VulnerabilityModeAuto, model.VulnerabilityModeOff, model.VulnerabilityModeRequired:
+		*value.destination = mode
+		return nil
+	default:
+		return fmt.Errorf("unsupported vulnerability mode %q", input)
+	}
 }
 
 func registerSSH(flags *flag.FlagSet, options *SSHOptions, includeTarget bool) {
