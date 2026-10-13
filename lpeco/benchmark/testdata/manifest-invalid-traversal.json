@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "ground_truth": {
+    "path": "../outside.json",
+    "sha256": "sha256:c1a53191b6bb536bc1cfc970c1e79eb0680465b2c2672756c5b1a48c2b35fae1"
+  }
+}
