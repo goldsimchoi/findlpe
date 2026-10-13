@@ -2,7 +2,10 @@ module github.com/normalone/lpeco
 
 go 1.26.7
 
-require golang.org/x/crypto v0.58.0
+require (
+	github.com/ulikunitz/xz v0.5.17
+	golang.org/x/crypto v0.58.0
+)
 
 require (
 	golang.org/x/sys v0.49.0 // indirect
