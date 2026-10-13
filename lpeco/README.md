@@ -30,6 +30,23 @@ make verify
 ./bin/lpeco help
 ```
 
+`make verify` checks formatting without rewriting source, runs `go vet`, the
+race-enabled test suite, both CLI builds, and Git diff hygiene. Use `make fmt`
+explicitly when you want to rewrite Go files.
+
+Run the additional gates independently when diagnosing a failure:
+
+```sh
+make test-integration
+make vulncheck
+```
+
+The repository CI aggregate is `make verify-ci`; it combines `verify`, policy
+and governance checks, workflow linting, integration tests, and the pinned
+vulnerability scan. `make test-vm` remains a separate release gate: it requires
+a prepared disposable image and its explicit guard, and ordinary hosted CI does
+not treat missing VM evidence as success.
+
 ## Transports
 
 Verified SSH (host-key checking is on by default):

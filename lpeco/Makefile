@@ -1,9 +1,23 @@
 GO ?= go
+GOFMT ?= gofmt
 
-.PHONY: fmt vet test test-race test-integration test-vm build verify
+GOVULNCHECK_VERSION ?= v1.9.0
+ACTIONLINT_VERSION ?= v1.7.12
+
+.PHONY: fmt fmt-check vet test test-race test-integration test-vm build \
+	test-policy test-governance vulncheck verify
 
 fmt:
 	$(GO) fmt ./...
+
+fmt-check:
+	@files="$$(find . -type f -name '*.go' -not -path './vendor/*' -print0 | xargs -0 -r $(GOFMT) -l)"; \
+	status=$$?; \
+	if [ "$$status" -ne 0 ]; then exit "$$status"; fi; \
+	if [ -n "$$files" ]; then \
+		printf '%s\n' "$$files"; \
+		exit 1; \
+	fi
 
 vet:
 	$(GO) vet ./...
@@ -25,5 +39,14 @@ build:
 	$(GO) build -trimpath -o bin/lpeco ./cmd/lpeco
 	$(GO) build -trimpath -o bin/lpeco-c2-example ./cmd/lpeco-c2-example
 
-verify: fmt vet test-race build
+test-policy:
+	sh ../.github/scripts/check-pr-policy_test.sh
+
+test-governance:
+	sh ../.github/scripts/check-governance.sh ..
+
+vulncheck:
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+verify: fmt-check vet test-race build
 	git diff --check
