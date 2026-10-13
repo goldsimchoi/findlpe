@@ -55,7 +55,8 @@ for required_file in \
 	.github/ISSUE_TEMPLATE/feature_request.yml \
 	.github/ISSUE_TEMPLATE/config.yml \
 	.github/CODEOWNERS \
-	.github/dependabot.yml; do
+	.github/dependabot.yml \
+	.github/workflows/ci.yml; do
 	require_file "$required_file"
 done
 
@@ -137,6 +138,46 @@ monthly_count=$(LC_ALL=C grep -Fc 'interval: "monthly"' "$root/.github/dependabo
 [ "$monthly_count" -eq 2 ] || fail '.github/dependabot.yml must contain two monthly schedules'
 group_count=$(LC_ALL=C grep -Fc 'update-types: ["minor", "patch"]' "$root/.github/dependabot.yml" || :)
 [ "$group_count" -eq 2 ] || fail '.github/dependabot.yml must group minor and patch updates in both ecosystems'
+commit_prefix_count=$(LC_ALL=C grep -Ec '^[[:space:]]+prefix: "build"$' "$root/.github/dependabot.yml" || :)
+[ "$commit_prefix_count" -eq 2 ] || fail '.github/dependabot.yml must use the build commit prefix in both ecosystems'
+commit_scope_count=$(LC_ALL=C grep -Fc 'include: "scope"' "$root/.github/dependabot.yml" || :)
+[ "$commit_scope_count" -eq 2 ] || fail '.github/dependabot.yml must include dependency scope in both ecosystems'
+
+workflow=.github/workflows/ci.yml
+require_text "$workflow" 'permissions:' 'workflow permissions'
+require_text "$workflow" '  contents: read' 'read-only contents permission'
+require_text "$workflow" 'cancel-in-progress: true' 'concurrency cancellation'
+require_text "$workflow" 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' 'the pinned checkout action'
+require_text "$workflow" 'actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e' 'the pinned setup-go action'
+require_text "$workflow" 'working-directory: lpeco' 'the Go module working directory'
+require_text "$workflow" 'BASE_REF: ${{ github.base_ref }}' 'the quoted PR base environment input'
+require_text "$workflow" 'HEAD_REF: ${{ github.head_ref }}' 'the quoted PR head environment input'
+require_text "$workflow" 'PR_TITLE: ${{ github.event.pull_request.title }}' 'the quoted PR title environment input'
+
+for job_id in policy quality integration vulnerability; do
+	if ! LC_ALL=C grep -Eq "^  $job_id:$" "$root/$workflow"; then
+		fail "$workflow is missing the $job_id job ID"
+	fi
+	if ! LC_ALL=C grep -Eq "^    name: $job_id$" "$root/$workflow"; then
+		fail "$workflow must expose the exact $job_id check name"
+	fi
+done
+timeout_count=$(LC_ALL=C grep -Ec '^    timeout-minutes: [1-9][0-9]*$' "$root/$workflow" || :)
+[ "$timeout_count" -eq 4 ] || fail "$workflow must set a finite timeout on all four jobs"
+working_directory_count=$(LC_ALL=C grep -Fc 'working-directory: lpeco' "$root/$workflow" || :)
+[ "$working_directory_count" -eq 3 ] || fail "$workflow must set the module directory on all three Go jobs"
+branch_filter_count=$(LC_ALL=C grep -Fc 'branches: [main, develop]' "$root/$workflow" || :)
+[ "$branch_filter_count" -eq 2 ] || fail "$workflow must cover pushes and pull requests for main and develop"
+
+invalid_uses=$(LC_ALL=C grep -En '^[[:space:]]*- uses:' "$root/$workflow" |
+	LC_ALL=C grep -Ev '@[0-9a-f]{40}([[:space:]]*#.*)?$' || :)
+if [ -n "$invalid_uses" ]; then
+	first_invalid_use=$(printf '%s\n' "$invalid_uses" | sed -n '1p')
+	fail "$workflow contains an action not pinned to a full commit SHA: $first_invalid_use"
+fi
+if LC_ALL=C grep -Eq 'uses:[[:space:]]+[^[:space:]#]+@v[0-9]+([[:space:]#]|$)' "$root/$workflow"; then
+	fail "$workflow contains a mutable major-version action reference"
+fi
 
 operational_files='README.md CONTRIBUTING.md SECURITY.md CHANGELOG.md docs/development.md docs/maintainers/github-settings.md lpeco/AGENTS.md'
 for operational_file in $operational_files; do

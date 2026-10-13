@@ -95,6 +95,23 @@ and `vulnerability`. External actions and installed tools are fixed to reviewed
 versions, workflow permissions are read-only, and pull request code receives no
 write token or repository secret.
 
+The workflow runs for pushes to, and pull requests targeting, `main` and
+`develop`. Its isolated jobs map directly to local commands:
+
+| Job ID | Command or check |
+|---|---|
+| `policy` | Governance and PR-policy scripts from the repository root |
+| `quality` | `make verify` from `lpeco/` |
+| `integration` | `make test-integration` from `lpeco/` |
+| `vulnerability` | `make vulncheck` from `lpeco/` |
+
+Pull request base, head, and title values enter the policy script through
+quoted environment variables; they are never interpolated into shell source.
+Each job has a finite timeout. Runs sharing a pull request or ref cancel older
+in-progress work, and checkout does not retain credentials. Validate workflow
+syntax locally with `make lint-actions`; `make verify-ci` includes that lint in
+the complete gate.
+
 ## Compatibility and releases
 
 The CLI flags, JSON report schema, stored session schema, and adapter protocol

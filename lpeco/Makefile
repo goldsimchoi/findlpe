@@ -5,7 +5,7 @@ GOVULNCHECK_VERSION ?= v1.9.0
 ACTIONLINT_VERSION ?= v1.7.12
 
 .PHONY: fmt fmt-check vet test test-race test-integration test-vm build \
-	test-policy test-governance vulncheck verify
+	test-policy test-governance vulncheck lint-actions verify verify-ci
 
 fmt:
 	$(GO) fmt ./...
@@ -48,5 +48,10 @@ test-governance:
 vulncheck:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
+lint-actions:
+	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) ../.github/workflows/*.yml
+
 verify: fmt-check vet test-race build
 	git diff --check
+
+verify-ci: verify test-policy test-governance lint-actions test-integration vulncheck
