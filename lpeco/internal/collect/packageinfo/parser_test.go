@@ -96,7 +96,7 @@ func TestParseOwnershipRejectsMalformedTruncatedAndDuplicateRecords(t *testing.T
 }
 
 func TestParseInstalledPackageMetadata(t *testing.T) {
-	installedPayload := "install ok installed\tlibc6:amd64\tamd64\t2.35-0ubuntu3.4\tglibc\t2.35-0ubuntu3.4"
+	installedPayload := "install ok installed\tlibc6:amd64\tamd64\t2:2.35-0ubuntu3.4\tglibc\t1:2.35-0ubuntu3.4"
 	uninstalledPayload := "deinstall ok config-files\toldpkg:amd64\tamd64\t1:2.0-1\toldsrc\t1:2.0-1"
 	missingSourcePayload := "install ok installed\tdemo:amd64\tamd64\t1.0-1\t\t"
 	frame := "LPECO_PACKAGE_METADATA_V1\n" +
@@ -109,7 +109,9 @@ func TestParseInstalledPackageMetadata(t *testing.T) {
 		t.Fatalf("metadata facts=%#v diagnostics=%#v", facts, diagnostics)
 	}
 	installed := facts[0]
-	if installed.Status != "install ok installed" || installed.BinaryPackage != "libc6" || installed.Architecture != "amd64" || installed.BinaryVersion.Raw != "2.35-0ubuntu3.4" || installed.BinaryVersion.Valid || installed.SourcePackage != "glibc" || installed.SourceVersion.Raw != "2.35-0ubuntu3.4" {
+	if installed.Status != "install ok installed" || installed.BinaryPackage != "libc6" || installed.Architecture != "amd64" ||
+		installed.BinaryVersion.Raw != "2:2.35-0ubuntu3.4" || !installed.BinaryVersion.Valid || installed.BinaryVersion.Epoch != 2 || installed.BinaryVersion.Upstream != "2.35" || installed.BinaryVersion.Revision != "0ubuntu3.4" ||
+		installed.SourcePackage != "glibc" || installed.SourceVersion.Raw != "1:2.35-0ubuntu3.4" || !installed.SourceVersion.Valid || installed.SourceVersion.Epoch != 1 {
 		t.Fatalf("installed metadata = %#v", installed)
 	}
 	if facts[1].Status != "deinstall ok config-files" {
@@ -117,6 +119,28 @@ func TestParseInstalledPackageMetadata(t *testing.T) {
 	}
 	if !slices.Contains(facts[2].MissingFacts, "source package metadata is missing") {
 		t.Fatalf("missing source metadata = %#v", facts[2])
+	}
+}
+
+func TestParseMetadataKeepsInvalidVersionsIneligible(t *testing.T) {
+	payload := "install ok installed\tdemo:amd64\tamd64\t1::2\tdemo\t1.0_bad"
+	frame := "LPECO_PACKAGE_METADATA_V1\n" + metadataRecord("demo:amd64", "dpkg", 0, payload)
+
+	facts, diagnostics := ParseMetadata([]byte(frame), "e-invalid-version")
+	if len(diagnostics) != 0 || len(facts) != 1 {
+		t.Fatalf("facts=%#v diagnostics=%#v", facts, diagnostics)
+	}
+	fact := facts[0]
+	if fact.BinaryVersion.Raw != "1::2" || fact.SourceVersion.Raw != "1.0_bad" || fact.BinaryVersion.Valid || fact.SourceVersion.Valid {
+		t.Fatalf("invalid raw versions were not retained: %#v", fact)
+	}
+	for _, missing := range []string{"binary package version is invalid", "source package version is invalid"} {
+		if !slices.Contains(fact.MissingFacts, missing) {
+			t.Fatalf("missing facts %#v do not contain %q", fact.MissingFacts, missing)
+		}
+	}
+	if fact.MatchEligible() {
+		t.Fatalf("invalid version became match-eligible: %#v", fact)
 	}
 }
 

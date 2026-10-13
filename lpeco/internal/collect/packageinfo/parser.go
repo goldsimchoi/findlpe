@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/normalone/lpeco/internal/model"
+	"github.com/normalone/lpeco/internal/vulndb"
 )
 
 type ownershipRecord struct {
@@ -265,8 +266,22 @@ func parseMetadataPayload(fact *InstalledPackageFact, payload string) {
 		fact.BinaryPackage = binaryName
 	}
 	fact.BinaryVersion = model.DebianVersion{Raw: fields[3]}
+	if fields[3] != "" {
+		parsed, err := vulndb.ParseDebianVersion(fields[3])
+		fact.BinaryVersion = parsed
+		if err != nil {
+			fact.MissingFacts = append(fact.MissingFacts, "binary package version is invalid")
+		}
+	}
 	fact.SourcePackage = fields[4]
 	fact.SourceVersion = model.DebianVersion{Raw: fields[5]}
+	if fields[5] != "" {
+		parsed, err := vulndb.ParseDebianVersion(fields[5])
+		fact.SourceVersion = parsed
+		if err != nil {
+			fact.MissingFacts = append(fact.MissingFacts, "source package version is invalid")
+		}
+	}
 	if fact.BinaryPackage == "" || fact.Architecture == "" || fact.BinaryVersion.Raw == "" {
 		fact.MissingFacts = append(fact.MissingFacts, "binary package metadata is missing")
 	}
