@@ -288,6 +288,16 @@ func (r *runner) updateProfileFromFacts() {
 			if json.Unmarshal(fact.Data, &value) == nil {
 				profile.NamespaceIDs = cloneStrings(value.IDs)
 			}
+		case "distribution":
+			var value model.DistributionProfile
+			if json.Unmarshal(fact.Data, &value) == nil {
+				profile.Distribution = cloneDistributionProfile(value)
+			}
+		case "kernel":
+			var value model.KernelProfile
+			if json.Unmarshal(fact.Data, &value) == nil {
+				profile.Kernel = cloneKernelProfile(value)
+			}
 		}
 	}
 	r.result.Profile = profile
@@ -491,7 +501,22 @@ func cloneProfile(value model.HostProfile) model.HostProfile {
 	result.AvailableCommands = cloneBools(value.AvailableCommands)
 	result.NamespaceIDs = cloneStrings(value.NamespaceIDs)
 	result.MissingCapabilities = append([]string(nil), value.MissingCapabilities...)
+	result.Distribution = cloneDistributionProfile(value.Distribution)
+	result.Kernel = cloneKernelProfile(value.Kernel)
 	return result
+}
+
+func cloneDistributionProfile(value model.DistributionProfile) model.DistributionProfile {
+	value.IDLike = append([]string(nil), value.IDLike...)
+	value.EvidenceIDs = append([]string(nil), value.EvidenceIDs...)
+	value.MissingFacts = append([]string(nil), value.MissingFacts...)
+	return value
+}
+
+func cloneKernelProfile(value model.KernelProfile) model.KernelProfile {
+	value.EvidenceIDs = append([]string(nil), value.EvidenceIDs...)
+	value.MissingFacts = append([]string(nil), value.MissingFacts...)
+	return value
 }
 
 func cloneBools(values map[string]bool) map[string]bool {
