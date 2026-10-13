@@ -133,15 +133,15 @@ func runVulnerabilityDatabaseStatus(ctx context.Context, options VulnerabilityOp
 	sort.Strings(channels)
 	if _, err := fmt.Fprintf(destination,
 		"integrity: valid\nprovider: %s\nschema: %d\ndigest: %s\nretrieved_at: %s\nage: %s\nstale: %t\nprovider_modified_at: %s\nsupported_releases: %s\nsupported_channels: %s\nadvisory_count: %d\nimpact_catalog_digest: %s\nsources:\n",
-		snapshot.Manifest.Provider, snapshot.Manifest.SchemaVersion, snapshot.Manifest.Digest,
+		redact.TerminalString(snapshot.Manifest.Provider), snapshot.Manifest.SchemaVersion, redact.TerminalString(snapshot.Manifest.Digest),
 		snapshot.Manifest.RetrievedAt.UTC().Format(time.RFC3339), age.Round(time.Second), snapshot.Stale,
-		formatStatusTime(snapshot.Manifest.MaxProviderModifiedAt), strings.Join(releases, ","), strings.Join(channels, ","),
-		len(snapshot.Advisories), snapshot.Manifest.ImpactCatalogDigest,
+		formatStatusTime(snapshot.Manifest.MaxProviderModifiedAt), redact.TerminalString(strings.Join(releases, ",")), redact.TerminalString(strings.Join(channels, ",")),
+		len(snapshot.Advisories), redact.TerminalString(snapshot.Manifest.ImpactCatalogDigest),
 	); err != nil {
 		return err
 	}
 	for _, source := range snapshot.Manifest.Sources {
-		if _, err := fmt.Fprintf(destination, "  - kind: %s url: %s provider_modified_at: %s\n", source.Kind, source.URL, formatStatusTime(source.ProviderModifiedAt)); err != nil {
+		if _, err := fmt.Fprintf(destination, "  - kind: %s url: %s provider_modified_at: %s\n", redact.TerminalString(source.Kind), redact.TerminalString(source.URL), formatStatusTime(source.ProviderModifiedAt)); err != nil {
 			return err
 		}
 	}

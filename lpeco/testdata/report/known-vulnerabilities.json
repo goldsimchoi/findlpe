@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "coverage_status": "complete",
+  "snapshot_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ordered_match_ids": [
+    "match-affected-inventory",
+    "match-affected-path",
+    "match-fixed",
+    "match-not-affected",
+    "match-unknown"
+  ],
+  "related_candidate_ids": {
+    "match-affected-path": [
+      "candidate-known"
+    ]
+  }
+}

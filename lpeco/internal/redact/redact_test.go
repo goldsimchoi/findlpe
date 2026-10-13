@@ -24,6 +24,14 @@ func TestStringMasksSecretsWithoutDestroyingPathsOrEvidenceIDs(t *testing.T) {
 	}
 }
 
+func TestTerminalStringEscapesControlsAndBidi(t *testing.T) {
+	input := "provider\x1b[31m\tline\r\nnext\u0085\u202eTOKEN=abc123"
+	want := `provider\u001B[31m\u0009line\u000D\u000Anext\u0085\u202ETOKEN=[REDACTED]`
+	if got := TerminalString(input); got != want {
+		t.Fatalf("TerminalString(%q) = %q, want %q", input, got, want)
+	}
+}
+
 func TestArgumentsAndEnvironmentApplyContextAwareMasking(t *testing.T) {
 	arguments := []string{"curl", "--user", "alice:hunter2", "--header", "Authorization: Bearer token", "/tmp/secret-file"}
 	wantArguments := []string{"curl", "--user", Redacted, "--header", "Authorization: Bearer [REDACTED]", "/tmp/secret-file"}

@@ -2,9 +2,11 @@ package redact
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const Redacted = "[REDACTED]"
@@ -29,6 +31,32 @@ func String(value string) string {
 	value = sensitiveFlagPattern.ReplaceAllString(value, `${1}${2}`+Redacted)
 	value = sensitiveAssignmentPattern.ReplaceAllString(value, `${1}=`+Redacted)
 	return value
+}
+
+// TerminalString redacts secrets and makes every untrusted value safe to
+// render on one terminal line. Control, formatting, and bidirectional
+// override characters are represented explicitly instead of being emitted.
+func TerminalString(value string) string {
+	value = String(value)
+	var output strings.Builder
+	for _, character := range value {
+		if unicode.IsPrint(character) && !bidirectionalControl(character) {
+			output.WriteRune(character)
+			continue
+		}
+		if character <= 0xffff {
+			_, _ = fmt.Fprintf(&output, "\\u%04X", character)
+		} else {
+			_, _ = fmt.Fprintf(&output, "\\U%08X", character)
+		}
+	}
+	return output.String()
+}
+
+func bidirectionalControl(character rune) bool {
+	return character == '\u061c' || character == '\u200e' || character == '\u200f' ||
+		character == '\u2028' || character == '\u2029' || character >= '\u202a' && character <= '\u202e' ||
+		character >= '\u2066' && character <= '\u2069'
 }
 
 func Arguments(values []string) []string {

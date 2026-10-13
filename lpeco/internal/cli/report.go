@@ -11,6 +11,8 @@ import (
 
 var defaultLimitations = []string{
 	"Candidate ranking does not prove successful privilege escalation.",
+	"Known-vulnerability matches are offline correlations for selected privileged components, not exploitation proof.",
+	"Vulnerability coverage is limited to the pinned provider snapshot, reviewed release scope, and observed package ownership.",
 	"Read-only observations can be incomplete when permissions deny access or processes exit during collection.",
 	"Short-lived processes may be missed between /proc snapshots, and consumers can change during collection.",
 }

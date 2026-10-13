@@ -2,6 +2,8 @@ LPECO read-only privilege escalation candidates
 Session: session-report (complete, transport ssh)
 Notice: Candidate ranking is a triage aid and does not prove successful privilege escalation.
 
+Deterministic candidates:
+
 [P0] systemd.writable-unit-source
   confidence: high | validation: read_only_validated | category: systemd
   Applied unit source is writable
@@ -15,6 +17,20 @@ Notice: Candidate ranking is a triage aid and does not prove successful privileg
   current: principal-user | target: principal-root | object: file-demo
   evidence: evidence-z
   missing facts: repeatable process trigger not confirmed
+
+Known-vulnerability path candidates:
+None.
+
+Match-only known-vulnerability inventory:
+Summary counts: fixed: 0 | not affected: 0
+Affected/unknown match-only records: none.
+
+Known-vulnerability coverage:
+  mode: off | status: legacy_not_requested | provider: none
+  target: release=none codename=none channel=none architecture=none
+  snapshot: none | schema: 0 | stale: false | retrieved: none | provider modified: none
+  supported releases: none | channels: none | impact catalog: none
+  diagnostics: none
 
 Diagnostics:
 - graph/fixture-graph: graph TOKEN=[REDACTED] (evidence: evidence-z)
