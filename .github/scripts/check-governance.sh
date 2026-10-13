@@ -49,7 +49,13 @@ for required_file in \
 	docs/maintainers/github-settings.md \
 	lpeco/AGENTS.md \
 	README.md \
-	.github/scripts/check-governance.sh; do
+	.github/scripts/check-governance.sh \
+	.github/PULL_REQUEST_TEMPLATE.md \
+	.github/ISSUE_TEMPLATE/bug_report.yml \
+	.github/ISSUE_TEMPLATE/feature_request.yml \
+	.github/ISSUE_TEMPLATE/config.yml \
+	.github/CODEOWNERS \
+	.github/dependabot.yml; do
 	require_file "$required_file"
 done
 
@@ -97,6 +103,40 @@ require_text lpeco/AGENTS.md 'docs/safety-model.md' 'the safety model instructio
 require_text lpeco/AGENTS.md 'docs/rules.md' 'the rule authoring instruction'
 require_text lpeco/AGENTS.md 'read-only' 'the read-only agent boundary'
 require_text lpeco/AGENTS.md 'state-changing' 'the state-changing behavior prohibition'
+
+for checklist_item in Safety Tests Documentation Compatibility Secrets; do
+	require_text .github/PULL_REQUEST_TEMPLATE.md \
+		"- [ ] $checklist_item" "the $checklist_item checklist item"
+done
+require_text .github/PULL_REQUEST_TEMPLATE.md 'redacted evidence' 'redacted evidence guidance'
+require_text .github/PULL_REQUEST_TEMPLATE.md 'Exact commands run' 'the command-results prompt'
+
+for bug_field in version distribution transport reproduction expected actual safety_impact; do
+	require_text .github/ISSUE_TEMPLATE/bug_report.yml \
+		"id: $bug_field" "the $bug_field bug field"
+done
+for feature_field in use_case proposed_evidence safety_class alternatives compatibility; do
+	require_text .github/ISSUE_TEMPLATE/feature_request.yml \
+		"id: $feature_field" "the $feature_field feature field"
+done
+require_text .github/ISSUE_TEMPLATE/config.yml \
+	'blank_issues_enabled: false' 'the disabled blank-issue setting'
+require_text .github/ISSUE_TEMPLATE/config.yml \
+	'https://github.com/goldsimchoi/findlpe/security' 'the security-report link'
+
+require_text .github/CODEOWNERS '@goldsimchoi' 'the repository owner'
+for owned_path in '/.github/' '/lpeco/internal/probe/' '/lpeco/internal/rules/' '/lpeco/internal/adapter/' '/lpeco/internal/report/' '/lpeco/docs/safety-model.md'; do
+	require_text .github/CODEOWNERS "$owned_path" "the $owned_path ownership route"
+done
+
+require_text .github/dependabot.yml 'package-ecosystem: "gomod"' 'the Go module ecosystem'
+require_text .github/dependabot.yml 'directory: "/lpeco"' 'the Go module directory'
+require_text .github/dependabot.yml 'package-ecosystem: "github-actions"' 'the Actions ecosystem'
+require_text .github/dependabot.yml 'directory: "/"' 'the Actions directory'
+monthly_count=$(LC_ALL=C grep -Fc 'interval: "monthly"' "$root/.github/dependabot.yml" || :)
+[ "$monthly_count" -eq 2 ] || fail '.github/dependabot.yml must contain two monthly schedules'
+group_count=$(LC_ALL=C grep -Fc 'update-types: ["minor", "patch"]' "$root/.github/dependabot.yml" || :)
+[ "$group_count" -eq 2 ] || fail '.github/dependabot.yml must group minor and patch updates in both ecosystems'
 
 operational_files='README.md CONTRIBUTING.md SECURITY.md CHANGELOG.md docs/development.md docs/maintainers/github-settings.md lpeco/AGENTS.md'
 for operational_file in $operational_files; do

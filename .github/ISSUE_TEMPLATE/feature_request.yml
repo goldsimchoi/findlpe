@@ -1,0 +1,65 @@
+name: Feature request
+description: Propose an authorized, evidence-driven, read-only LPECO capability.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        LPECO does not accept exploit execution, payload delivery, persistence,
+        credential attacks, or target-state mutation as product features.
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Authorized use case
+      description: Describe the assessment decision this feature supports and who consumes the result.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_evidence
+    attributes:
+      label: Proposed evidence
+      description: Identify typed facts, evidence sources, boundaries, consumers, triggers, and missing-fact behavior.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: safety_class
+    attributes:
+      label: Proposed safety class
+      options:
+        - No target probe
+        - passive-read
+        - observable-read with explicit opt-in
+        - temporary-artifact or state-changing (outside the accepted boundary)
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain existing probes, rules, reports, or operator workflows that were considered.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration impact
+      description: Cover CLI, report schema, stored sessions, adapter protocol, dependencies, and documentation.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: The use case is for systems I own or am explicitly authorized to assess.
+          required: true
+        - label: The proposal does not require exploitation, payloads, credentials, persistence, or service mutation.
+          required: true

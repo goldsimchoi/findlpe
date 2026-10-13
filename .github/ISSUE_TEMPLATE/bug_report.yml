@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible LPECO defect with synthetic, redacted details.
+title: "fix: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not submit vulnerabilities here. Use the private reporting link in SECURITY.md.
+        Never paste credentials, private keys, tokens, customer identifiers, or raw assessment output.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Provide the LPECO version when available, or the full source commit.
+    validations:
+      required: true
+
+  - type: input
+    id: distribution
+    attributes:
+      label: Linux distribution and kernel
+      description: Include architecture and relevant container or init environment.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - Verified SSH
+        - Raw listener
+        - Raw stdio bridge
+        - JSON-RPC C2 adapter
+        - Local fixture or report-only flow
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Redacted reproduction
+      description: Use synthetic values and the smallest command sequence that reproduces the defect.
+      placeholder: Describe setup, command arguments, and deterministic steps without raw target evidence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Summarize redacted diagnostics; do not paste session evidence bodies.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety_impact
+    attributes:
+      label: Safety and data impact
+      description: State whether target state changed, a command exceeded its safety class, evidence was misclassified, or sensitive data appeared.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Authorization and disclosure
+      options:
+        - label: I reproduced this only in an environment I own or am explicitly authorized to assess.
+          required: true
+        - label: This report contains no live secret or identifiable assessment evidence.
+          required: true

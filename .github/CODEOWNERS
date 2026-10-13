@@ -1,0 +1,18 @@
+* @goldsimchoi
+
+/.github/ @goldsimchoi
+/SECURITY.md @goldsimchoi
+/CONTRIBUTING.md @goldsimchoi
+/docs/maintainers/ @goldsimchoi
+
+/lpeco/internal/probe/ @goldsimchoi
+/lpeco/internal/collect/ @goldsimchoi
+/lpeco/internal/graph/ @goldsimchoi
+/lpeco/internal/rules/ @goldsimchoi
+/lpeco/internal/adapter/ @goldsimchoi
+/lpeco/internal/report/ @goldsimchoi
+/lpeco/internal/redact/ @goldsimchoi
+/lpeco/internal/store/ @goldsimchoi
+/lpeco/docs/safety-model.md @goldsimchoi
+/lpeco/docs/rules.md @goldsimchoi
+/lpeco/docs/adapter-protocol.md @goldsimchoi
