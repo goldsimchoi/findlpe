@@ -116,7 +116,9 @@ func ImportManual(reader io.Reader, run RunIdentity) ([]Observation, error) {
 	if len(observations) != 1 {
 		return nil, errors.New("manual import requires exactly one reviewed observation per run")
 	}
-	if _, err := validateObservations(observations, map[string]RunIdentity{run.ID: run}); err != nil {
+	if _, err := validateObservations(observations, map[string]RunIdentity{run.ID: run}, map[string]ToolIdentity{
+		run.ToolID: {ID: run.ToolID, Role: "baseline"},
+	}); err != nil {
 		return nil, err
 	}
 	observation := observations[0]

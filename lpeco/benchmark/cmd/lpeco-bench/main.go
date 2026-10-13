@@ -18,7 +18,7 @@ import (
 const usageText = `usage:
   lpeco-bench validate --manifest PATH
   lpeco-bench import --tool {lpeco|osv-scanner|openscap|manual} --identity PATH --input PATH|- --output PATH [--force]
-  lpeco-bench score --manifest PATH --observations PATH [--observations PATH ...]
+  lpeco-bench score --manifest PATH --observations PATH [--observations PATH ...] [--output PATH] [--force]
 `
 
 func main() {
@@ -161,11 +161,16 @@ func runScore(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int
 	manifestPath := flags.String("manifest", "", "local manifest path or - for stdin")
 	var observationPaths stringList
 	flags.Var(&observationPaths, "observations", "local normalized observation path; repeatable")
+	outputPath := flags.String("output", "", "optional local report output path")
+	force := flags.Bool("force", false, "atomically replace an existing report output")
 	if code, stop := parseFlags(flags, arguments, stderr); stop {
 		return code
 	}
 	if *manifestPath == "" || len(observationPaths) == 0 {
 		return usageError(stderr, "score requires --manifest and at least one --observations")
+	}
+	if *outputPath == "-" {
+		return usageError(stderr, "--output must be a local file")
 	}
 	stdinUses := 0
 	if *manifestPath == "-" {
@@ -210,10 +215,28 @@ func runScore(arguments []string, stdin io.Reader, stdout, stderr io.Writer) int
 	if err != nil {
 		return commandError(stderr, "score", err)
 	}
-	encoder := json.NewEncoder(stdout)
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
-		return commandError(stderr, "score", fmt.Errorf("write report: %w", err))
+		return commandError(stderr, "score", fmt.Errorf("encode report: %w", err))
+	}
+	if *outputPath == "" {
+		if _, err := stdout.Write(encoded.Bytes()); err != nil {
+			return commandError(stderr, "score", fmt.Errorf("write report: %w", err))
+		}
+		return 0
+	}
+	if err := writePrivateAtomic(*outputPath, encoded.Bytes(), *force); err != nil {
+		return commandError(stderr, "score", err)
+	}
+	result := struct {
+		SchemaVersion int    `json:"schema_version"`
+		Status        string `json:"status"`
+		Tools         int    `json:"tools"`
+	}{1, "written", len(report.Tools)}
+	if err := writeCompactJSON(stdout, result); err != nil {
+		return commandError(stderr, "score", err)
 	}
 	return 0
 }

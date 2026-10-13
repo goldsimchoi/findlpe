@@ -30,12 +30,13 @@ func TestManifestCheckedInCoversPinnedGroundTruth(t *testing.T) {
 		t.Fatalf("ground truth digest = %s, want %s", got, manifest.GroundTruth.SHA256)
 	}
 	var core struct {
-		Scenarios []struct {
-			ID string `json:"id"`
-		} `json:"scenarios"`
+		Scenarios []coreGroundTruthScenario `json:"scenarios"`
 	}
 	if err := json.Unmarshal(coreBody, &core); err != nil {
 		t.Fatal(err)
+	}
+	if got := coreGroundTruthSemanticsDigest(core.Scenarios); got != CoreGroundTruthSemanticsSHA256 {
+		t.Fatalf("ground-truth semantic digest = %s, want %s", got, CoreGroundTruthSemanticsSHA256)
 	}
 	got := make([]string, 0, len(manifest.Scenarios))
 	for _, scenario := range manifest.Scenarios {
@@ -126,6 +127,13 @@ func TestManifestValidationRules(t *testing.T) {
 		{name: "snapshot digest", mutate: func(value *Manifest) { value.AdvisorySnapshotDigest = "latest" }},
 		{name: "catalog digest", mutate: func(value *Manifest) { value.ImpactCatalogDigest = "" }},
 		{name: "duplicate tool", mutate: func(value *Manifest) { value.Tools = append(value.Tools, value.Tools[0]) }},
+		{name: "baseline promoted to product", mutate: func(value *Manifest) {
+			value.Tools[1].Role = "product"
+			value.Tools[1].NotRun = false
+			value.Tools[1].Version = "fixture-v1"
+			value.Tools[1].SHA256 = digestOf('5')
+		}},
+		{name: "product demoted to baseline", mutate: func(value *Manifest) { value.Tools[0].Role = "baseline" }},
 		{name: "latest tool", mutate: func(value *Manifest) { value.Tools[0].Version = "latest" }},
 		{name: "tool digest", mutate: func(value *Manifest) { value.Tools[0].SHA256 = "sha256:short" }},
 		{name: "duplicate scenario", mutate: func(value *Manifest) { value.Scenarios = append(value.Scenarios, value.Scenarios[0]) }},
@@ -138,6 +146,7 @@ func TestManifestValidationRules(t *testing.T) {
 		{name: "match state", mutate: func(value *Manifest) { value.Scenarios[0].Expected.MatchState = "maybe" }},
 		{name: "path tier", mutate: func(value *Manifest) { value.Scenarios[0].Expected.PathTier = "P0" }},
 		{name: "P1 without affected", mutate: func(value *Manifest) { value.Scenarios[0].Expected.MatchState = "fixed" }},
+		{name: "valid but altered ground truth", mutate: func(value *Manifest) { value.Scenarios[0].Expected.PathTier = "P2" }},
 		{name: "missing core scenario", mutate: func(value *Manifest) { value.Scenarios = value.Scenarios[1:] }},
 		{name: "unknown dependency", mutate: func(value *Manifest) { value.Scenarios[0].DependsOn = []string{"missing"} }},
 		{name: "cycle", mutate: func(value *Manifest) {
@@ -189,8 +198,9 @@ func TestManifestRunEligibilityAndOrder(t *testing.T) {
 		ImageDigest: scenario.ImageDigest, AdvisorySnapshotDigest: eligible.AdvisorySnapshotDigest,
 		ImpactCatalogDigest: eligible.ImpactCatalogDigest, Transport: "ssh",
 		DistributionID: scenario.Distribution.ID, Release: scenario.Distribution.Release,
-		PackageClass: scenario.PackageClass, ScenarioClass: scenario.ScenarioClass,
-		Acquisition: "native", DisposableCommand: []string{"lpeco", "scan", "fixture"},
+		PackageClass: scenario.PackageClass, Package: "demo", PackageVersion: "1.0-1",
+		ScenarioClass: scenario.ScenarioClass,
+		Acquisition:   "native", DisposableCommand: []string{"lpeco", "scan", "fixture"},
 	})
 	if err := eligible.Validate(); err != nil {
 		t.Fatal(err)

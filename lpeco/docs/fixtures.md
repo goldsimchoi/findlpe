@@ -19,12 +19,14 @@ benchmark harness consumes the scenario IDs; scanner output is never copied
 back into expected labels.
 
 The independent comparison harness in [`benchmark/`](../benchmark/README.md)
-references this corpus by its reviewed SHA-256. Its manifest pins scenario
-images, tool builds, the advisory snapshot, and the impact catalog. Benchmark
-results are normalized observations only: raw scanner output, advisory prose,
-credentials, and target identifiers are rejected. Optional baseline artifacts
-must be acquired separately in a disposable authorized environment; the test
-suite and `lpeco-bench` do not execute those tools or use the network.
+references this corpus by its reviewed file and semantic SHA-256 values. Its
+manifest pins scenario images, tool builds, exact package/version identities,
+the advisory snapshot, and the impact catalog. Benchmark results are normalized
+observations bound to a canonical run-identity digest only: raw scanner output,
+advisory prose, credentials, and target identifiers are rejected. Optional
+baseline artifacts must be acquired separately in a disposable authorized
+environment; the test suite and `lpeco-bench` do not execute those tools or use
+the network.
 
 The package-correlation cross-adapter fixture sends the same bounded package
 ownership and metadata requests through ephemeral SSH, raw listener, stdio raw,

@@ -112,9 +112,12 @@ func TestCLIScoreIsDeterministicAndRejectsIneligibleRuns(t *testing.T) {
 	writeJSONFile(t, observationPath, map[string]any{
 		"schema_version": 1,
 		"observations": []benchmark.Observation{{
-			SchemaVersion: 1, ID: "observation-test", RunID: runIdentity.ID,
+			SchemaVersion: 1, ID: "observation-test", RunID: runIdentity.ID, RunIdentitySHA256: benchmark.RunIdentityDigest(runIdentity),
 			ScenarioID: runIdentity.ScenarioID, ToolID: runIdentity.ToolID,
-			Outcome: "complete", MatchState: "affected", PathTier: "P1", Release: runIdentity.Release,
+			Outcome: "complete", MatchState: "affected", PathTier: "P1", Package: "demo", Version: "1.0-1", Release: runIdentity.Release,
+			CoverageStatus: "complete", SnapshotStale: testBoolPointer(false),
+			ResourceMeasurement: benchmark.MeasurementMeasured, SafetyMeasurement: benchmark.MeasurementMeasured,
+			MeasurementProvenance: "fixture-monitor-v1",
 		}},
 	})
 	arguments := []string{"score", "--manifest", manifestPath, "--observations", observationPath}
@@ -130,13 +133,46 @@ func TestCLIScoreIsDeterministicAndRejectsIneligibleRuns(t *testing.T) {
 	if report.SchemaVersion != 1 || len(report.Tools) == 0 {
 		t.Fatalf("score report = %#v", report)
 	}
+	reportPath := filepath.Join(temporary, "report.json")
+	outputArguments := append(append([]string(nil), arguments...), "--output", reportPath)
+	code, stdout, stderr := invokeCLI(outputArguments, "")
+	if code != 0 || stderr != "" || stdout != "{\"schema_version\":1,\"status\":\"written\",\"tools\":5}\n" {
+		t.Fatalf("score output = (%d, %q, %q)", code, stdout, stderr)
+	}
+	info, err := os.Stat(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("score output mode = %04o", info.Mode().Perm())
+	}
+	firstReport, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr = invokeCLI(outputArguments, "")
+	if code != 1 || !strings.Contains(stderr, "already exists") {
+		t.Fatalf("score overwrite refusal = (%d, %q)", code, stderr)
+	}
+	outputArguments = append(outputArguments, "--force")
+	code, _, stderr = invokeCLI(outputArguments, "")
+	if code != 0 || stderr != "" {
+		t.Fatalf("forced score output = (%d, %q)", code, stderr)
+	}
+	forcedReport, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstReport, forcedReport) {
+		t.Fatal("forced score changed deterministic report output")
+	}
 
 	manifest.Runs = append(manifest.Runs, benchmark.RunIdentity{
 		ID: "unpinned-baseline", ToolID: "osv-scanner", ScenarioID: "annotated-reachable-p1",
 		Optional: true, Acquisition: "preproduced",
 	})
 	writeJSONFile(t, manifestPath, manifest)
-	code, stdout, stderr := invokeCLI(arguments, "")
+	code, stdout, stderr = invokeCLI(arguments, "")
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "ineligible run") {
 		t.Fatalf("ineligible score = (%d, %q, %q)", code, stdout, stderr)
 	}
@@ -158,8 +194,12 @@ func TestCLIManualImportAcceptsOnlyReviewedNormalizedObservations(t *testing.T) 
 	outputPath := filepath.Join(temporary, "normalized.json")
 	observation := benchmark.Observation{
 		SchemaVersion: 1, ID: "observation-reviewed", RunID: runIdentity.ID,
-		ScenarioID: runIdentity.ScenarioID, ToolID: runIdentity.ToolID, Outcome: "complete",
+		RunIdentitySHA256: benchmark.RunIdentityDigest(runIdentity),
+		ScenarioID:        runIdentity.ScenarioID, ToolID: runIdentity.ToolID, Outcome: "complete",
 		MatchState: "affected", PathTier: "none", Package: "demo", Version: "1.0-1", Release: "22.04",
+		CoverageStatus:      benchmark.CoverageUnavailable,
+		ResourceMeasurement: benchmark.MeasurementUnavailable, SafetyMeasurement: benchmark.MeasurementUnavailable,
+		MeasurementProvenance: "manual-review-no-monitor",
 	}
 	writeJSONFile(t, inputPath, map[string]any{"schema_version": 1, "observations": []benchmark.Observation{observation}})
 	arguments := []string{
@@ -215,6 +255,7 @@ func testRunIdentity() benchmark.RunIdentity {
 		AdvisorySnapshotDigest: "sha256:d610988e192438d45a99d151296eaad4a3c3e9cbb20729a7041d6d4bf4c8ba64",
 		ImpactCatalogDigest:    "sha256:e989f283b88336525c314a4898ceaae909009d71fe459c0503ebde94a2fd72cf",
 		Transport:              "ssh", DistributionID: "ubuntu", Release: "22.04", PackageClass: "userspace",
+		Package: "demo", PackageVersion: "1.0-1",
 		ScenarioClass: "annotated_reachable_userspace", Acquisition: "native",
 	}
 }
@@ -234,4 +275,8 @@ func writeTestFile(t *testing.T, path string, body []byte, mode os.FileMode) {
 	if err := os.WriteFile(path, body, mode); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func testBoolPointer(value bool) *bool {
+	return &value
 }

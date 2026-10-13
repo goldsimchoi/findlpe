@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"sort"
 	"testing"
@@ -17,7 +18,7 @@ func TestEvaluateConfusionMatrixExcludesUnknownUnsupportedErrorsAndMissing(t *te
 		tier     string
 	}{
 		{"annotated-reachable-p1", "complete", "affected", "P1"},
-		{"missing-annotation-p2", "complete", "fixed", "P1"},
+		{"missing-annotation-p2", "complete", "fixed", "none"},
 		{"missing-reachability-p2", "unknown", "unknown", "none"},
 		{"fixed-package", "complete", "fixed", "none"},
 		{"explicit-not-affected", "complete", "affected", "match_only"},
@@ -32,11 +33,22 @@ func TestEvaluateConfusionMatrixExcludesUnknownUnsupportedErrorsAndMissing(t *te
 		if test.outcome == "missing" {
 			continue
 		}
+		coverageStatus := "complete"
+		if test.scenario == "unsupported-target" {
+			coverageStatus = "unsupported"
+		} else if test.scenario == "corrupt-database" {
+			coverageStatus = "incomplete"
+		}
+		stale := false
 		observations = append(observations, Observation{
-			SchemaVersion: 1, ID: "observation-" + test.scenario, RunID: run.ID,
+			SchemaVersion: 1, ID: "observation-" + test.scenario, RunID: run.ID, RunIdentitySHA256: RunIdentityDigest(run),
 			ScenarioID: run.ScenarioID, ToolID: run.ToolID, Outcome: test.outcome,
-			MatchState: test.match, PathTier: test.tier, RuntimeMillis: int64((index + 1) * 10),
-			RemoteCommands: int64(index + 1), OutputBytes: int64((index + 1) * 100),
+			MatchState: test.match, PathTier: test.tier, Package: "demo", Version: "1.0-1", Release: run.Release,
+			CoverageStatus: coverageStatus, SnapshotStale: &stale,
+			ResourceMeasurement: MeasurementMeasured, SafetyMeasurement: MeasurementMeasured,
+			MeasurementProvenance: "fixture-monitor-v1",
+			RuntimeMillis:         int64((index + 1) * 10),
+			RemoteCommands:        int64(index + 1), OutputBytes: int64((index + 1) * 100),
 			AdapterFailures: boolInt64(test.outcome == "crash"), TargetEgress: boolInt64(test.scenario == "explicit-not-affected"),
 		})
 	}
@@ -56,7 +68,7 @@ func TestEvaluateConfusionMatrixExcludesUnknownUnsupportedErrorsAndMissing(t *te
 	assertRatio(t, tool.Micro.Fixed.F1, 2, 3, 2.0/3.0)
 
 	assertRatio(t, tool.Micro.Path.Exact, 2, 4, 0.5)
-	assertRatio(t, tool.Micro.Path.Adjacent, 4, 4, 1)
+	assertRatio(t, tool.Micro.Path.Adjacent, 3, 4, 0.75)
 	assertRatio(t, tool.Micro.Path.P1, 1, 1, 1)
 	assertRatio(t, tool.Micro.Path.P2, 0, 1, 0)
 	assertRatio(t, tool.Micro.Path.None, 1, 2, 0.5)
@@ -120,6 +132,99 @@ func TestEvaluateCrossTransportConsistencyAndSafety(t *testing.T) {
 	}
 }
 
+func TestEvaluateCrossTransportConsistencyIncludesCoverageStaleness(t *testing.T) {
+	manifest := loadCheckedInManifest(t)
+	manifest.Runs = []RunIdentity{
+		pinnedRun(t, manifest, "stale-ssh", "annotated-reachable-p1", "ssh"),
+		pinnedRun(t, manifest, "stale-raw", "annotated-reachable-p1", "raw-listen"),
+	}
+	first := completeObservation(manifest.Runs[0], "affected", "P1", 10)
+	second := completeObservation(manifest.Runs[1], "affected", "P1", 10)
+	second.SnapshotStale = boolPointer(true)
+	report, err := Evaluate(manifest, []Observation{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := findToolReport(t, report, "lpeco")
+	if tool.CrossTransport.ComparedGroups != 1 || tool.CrossTransport.MismatchedGroups != 1 {
+		t.Fatalf("cross-transport coverage consistency = %#v", tool.CrossTransport)
+	}
+	assertRatio(t, tool.CrossTransport.Consistent, 0, 1, 0)
+}
+
+func TestEvaluateDoesNotPassUnmeasuredSafety(t *testing.T) {
+	manifest := loadCheckedInManifest(t)
+	manifest.Runs = []RunIdentity{pinnedRun(t, manifest, "unmeasured", "annotated-reachable-p1", "ssh")}
+	observation := completeObservation(manifest.Runs[0], "affected", "P1", 10)
+	observation.ResourceMeasurement = MeasurementUnavailable
+	observation.SafetyMeasurement = MeasurementUnavailable
+	observation.MeasurementProvenance = "fixture-monitor-unavailable"
+	observation.RuntimeMillis = 0
+	observation.RemoteCommands = 0
+	observation.OutputBytes = 0
+	report, err := Evaluate(manifest, []Observation{observation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	safety := findToolReport(t, report, "lpeco").Safety
+	if safety.ObservedRuns != 0 || safety.ZeroWrites || safety.ZeroEgress || safety.Passed {
+		t.Fatalf("unmeasured safety passed = %#v", safety)
+	}
+}
+
+func TestEvaluateRejectsCounterOverflow(t *testing.T) {
+	manifest := loadCheckedInManifest(t)
+	manifest.Runs = []RunIdentity{
+		pinnedRun(t, manifest, "overflow-a", "annotated-reachable-p1", "ssh"),
+		pinnedRun(t, manifest, "overflow-b", "missing-annotation-p2", "ssh"),
+		pinnedRun(t, manifest, "overflow-c", "missing-reachability-p2", "ssh"),
+	}
+	observations := make([]Observation, 0, len(manifest.Runs))
+	for index, run := range manifest.Runs {
+		observation := completeObservation(run, "affected", "P2", 10)
+		if index < 2 {
+			observation.TargetWrites = math.MaxInt64
+			observation.TargetEgress = math.MaxInt64
+		} else {
+			observation.TargetWrites = 2
+			observation.TargetEgress = 2
+		}
+		observations = append(observations, observation)
+	}
+	if _, err := Evaluate(manifest, observations); err == nil {
+		t.Fatal("overflowing safety counters were accepted")
+	}
+}
+
+func TestEvaluateCoverageFailureCannotBecomeTrueNegative(t *testing.T) {
+	manifest := loadCheckedInManifest(t)
+	manifest.Runs = []RunIdentity{pinnedRun(t, manifest, "wrong-complete", "unsupported-target", "ssh")}
+	observation := completeObservation(manifest.Runs[0], "none", "none", 10)
+	report, err := Evaluate(manifest, []Observation{observation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := findToolReport(t, report, "lpeco")
+	matrix := tool.Micro.Affected.ConfusionMatrix
+	if matrix.TP+matrix.FP+matrix.TN+matrix.FN != 0 || tool.Micro.Path.Exact.Available {
+		t.Fatalf("coverage failure leaked into state/path metrics: %#v / %#v", matrix, tool.Micro.Path)
+	}
+	assertRatio(t, tool.Micro.Coverage.StatusExact, 0, 1, 0)
+}
+
+func TestEvaluateScoresCoverageAndStalenessSeparately(t *testing.T) {
+	manifest := loadCheckedInManifest(t)
+	manifest.Runs = []RunIdentity{pinnedRun(t, manifest, "stale-mismatch", "stale-database", "ssh")}
+	observation := completeObservation(manifest.Runs[0], "affected", "P2", 10)
+	report, err := Evaluate(manifest, []Observation{observation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage := findToolReport(t, report, "lpeco").Micro.Coverage
+	assertRatio(t, coverage.StatusExact, 1, 1, 1)
+	assertRatio(t, coverage.StaleExact, 0, 1, 0)
+}
+
 func TestEvaluateEmptyDenominatorsAndIneligibleRunsStayExplicit(t *testing.T) {
 	manifest := loadCheckedInManifest(t)
 	manifest.Runs = []RunIdentity{
@@ -127,8 +232,12 @@ func TestEvaluateEmptyDenominatorsAndIneligibleRunsStayExplicit(t *testing.T) {
 		{ID: "optional-unpinned", ToolID: "osv-scanner", ScenarioID: "annotated-reachable-p1", Optional: true, Acquisition: "preproduced"},
 	}
 	observation := Observation{
-		SchemaVersion: 1, ID: "unknown-only-observation", RunID: "unknown-only", ScenarioID: "ambiguous-ownership-unknown",
-		ToolID: "lpeco", Outcome: "unknown", MatchState: "unknown", PathTier: "none",
+		SchemaVersion: 1, ID: "unknown-only-observation", RunID: "unknown-only", RunIdentitySHA256: RunIdentityDigest(manifest.Runs[0]),
+		ScenarioID: "ambiguous-ownership-unknown",
+		ToolID:     "lpeco", Outcome: "unknown", MatchState: "unknown", PathTier: "none",
+		Release: manifest.Runs[0].Release, CoverageStatus: "incomplete", SnapshotStale: boolPointer(false),
+		ResourceMeasurement: MeasurementMeasured,
+		SafetyMeasurement:   MeasurementMeasured, MeasurementProvenance: "fixture-monitor-v1",
 	}
 	report, err := Evaluate(manifest, []Observation{observation})
 	if err != nil {
@@ -175,8 +284,16 @@ func TestEvaluateRejectsBadJoinsDuplicatesAndIsDeterministic(t *testing.T) {
 		{name: "unknown run", observations: []Observation{func() Observation { value := first; value.RunID = "missing"; return value }()}},
 		{name: "scenario mismatch", observations: []Observation{func() Observation { value := first; value.ScenarioID = "fixed-package"; return value }()}},
 		{name: "tool mismatch", observations: []Observation{func() Observation { value := first; value.ToolID = "openscap"; return value }()}},
+		{name: "run identity mismatch", observations: []Observation{func() Observation { value := first; value.RunIdentitySHA256 = digestOf('9'); return value }()}},
 		{name: "negative resources", observations: []Observation{func() Observation { value := first; value.OutputBytes = -1; return value }()}},
 		{name: "bad outcome", observations: []Observation{func() Observation { value := first; value.Outcome = "success-ish"; return value }()}},
+		{name: "release mismatch", observations: []Observation{func() Observation { value := first; value.Release = "99.99"; return value }()}},
+		{name: "package mismatch", observations: []Observation{func() Observation { value := first; value.Package = "other"; return value }()}},
+		{name: "complete without package context", observations: []Observation{func() Observation {
+			value := first
+			value.MatchState, value.PathTier, value.Package, value.Version = "none", "none", "", ""
+			return value
+		}()}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -184,6 +301,52 @@ func TestEvaluateRejectsBadJoinsDuplicatesAndIsDeterministic(t *testing.T) {
 				t.Fatal("invalid observations were accepted")
 			}
 		})
+	}
+}
+
+func TestEvaluateRejectsBaselinePrivilegePathClaim(t *testing.T) {
+	manifest := loadCheckedInManifest(t)
+	for index := range manifest.Tools {
+		if manifest.Tools[index].ID == "osv-scanner" {
+			manifest.Tools[index].Version = "fixture-v1"
+			manifest.Tools[index].SHA256 = digestOf('5')
+			manifest.Tools[index].NotRun = false
+		}
+	}
+	scenario := manifest.Scenarios[0]
+	run := RunIdentity{
+		ID: "osv-path-claim", ToolID: "osv-scanner", ToolName: "OSV-Scanner", ToolVersion: "fixture-v1",
+		ToolSHA256: digestOf('5'), ScenarioID: scenario.ID, ImageDigest: scenario.ImageDigest,
+		AdvisorySnapshotDigest: manifest.AdvisorySnapshotDigest, ImpactCatalogDigest: manifest.ImpactCatalogDigest,
+		Transport: "offline", DistributionID: scenario.Distribution.ID, Release: scenario.Distribution.Release,
+		PackageClass: scenario.PackageClass, Package: "demo", PackageVersion: "1.0-1",
+		ScenarioClass: scenario.ScenarioClass, Acquisition: "preproduced", Optional: true,
+	}
+	manifest.Runs = []RunIdentity{run}
+	observation := completeObservation(run, "affected", "P1", 10)
+	observation.CoverageStatus = CoverageUnavailable
+	observation.SnapshotStale = nil
+	observation.Release = run.Release
+	if _, err := Evaluate(manifest, []Observation{observation}); err == nil {
+		t.Fatal("baseline privilege-path claim was accepted")
+	}
+}
+
+func TestValidateObservationsDoesNotTrustMutableProductRole(t *testing.T) {
+	manifest := loadCheckedInManifest(t)
+	run := pinnedRun(t, manifest, "role-bypass", "annotated-reachable-p1", "offline")
+	run.ToolID = "osv-scanner"
+	run.ToolName = "OSV-Scanner"
+	run.ToolVersion = "fixture-v1"
+	run.ToolSHA256 = digestOf('5')
+	run.Acquisition = "preproduced"
+	observation := completeObservation(run, "affected", "P1", 10)
+	if _, err := validateObservations(
+		[]Observation{observation},
+		map[string]RunIdentity{run.ID: run},
+		map[string]ToolIdentity{run.ToolID: {ID: run.ToolID, Role: "product"}},
+	); err == nil {
+		t.Fatal("mutable product role allowed a baseline privilege-path claim")
 	}
 }
 
@@ -211,17 +374,26 @@ func pinnedRun(t *testing.T, manifest Manifest, id, scenarioID, transport string
 		ID: id, ToolID: tool.ID, ToolName: tool.Name, ToolVersion: tool.Version, ToolSHA256: tool.SHA256,
 		ScenarioID: scenario.ID, ImageDigest: scenario.ImageDigest, AdvisorySnapshotDigest: manifest.AdvisorySnapshotDigest,
 		ImpactCatalogDigest: manifest.ImpactCatalogDigest, Transport: transport, DistributionID: scenario.Distribution.ID,
-		Release: scenario.Distribution.Release, PackageClass: scenario.PackageClass, ScenarioClass: scenario.ScenarioClass,
-		Acquisition: "native", DisposableCommand: []string{"lpeco", "scan", "fixture"},
+		Release: scenario.Distribution.Release, PackageClass: scenario.PackageClass, Package: "demo", PackageVersion: "1.0-1",
+		ScenarioClass: scenario.ScenarioClass,
+		Acquisition:   "native", DisposableCommand: []string{"lpeco", "scan", "fixture"},
 	}
 }
 
 func completeObservation(run RunIdentity, match, tier string, runtime int64) Observation {
 	return Observation{
-		SchemaVersion: 1, ID: "observation-" + run.ID, RunID: run.ID, ScenarioID: run.ScenarioID, ToolID: run.ToolID,
-		Outcome: "complete", MatchState: match, PathTier: tier, RuntimeMillis: runtime,
-		RemoteCommands: 1, OutputBytes: runtime * 10,
+		SchemaVersion: 1, ID: "observation-" + run.ID, RunID: run.ID, RunIdentitySHA256: RunIdentityDigest(run),
+		ScenarioID: run.ScenarioID, ToolID: run.ToolID, Outcome: "complete", MatchState: match, PathTier: tier,
+		Package: "demo", Version: "1.0-1", Release: run.Release, CoverageStatus: "complete", SnapshotStale: boolPointer(false),
+		RuntimeMillis:       runtime,
+		ResourceMeasurement: MeasurementMeasured, SafetyMeasurement: MeasurementMeasured,
+		MeasurementProvenance: "fixture-monitor-v1",
+		RemoteCommands:        1, OutputBytes: runtime * 10,
 	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func findToolReport(t *testing.T, report Report, toolID string) ToolReport {

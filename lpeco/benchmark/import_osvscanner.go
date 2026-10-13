@@ -106,7 +106,7 @@ func ImportOSVScanner(reader io.Reader, run RunIdentity) ([]Observation, error) 
 		}
 	}
 	if selected == nil {
-		return []Observation{newObservation(run, "complete", "none", "none", "", "", nil)}, nil
+		return nil, errors.New("complete OSV-Scanner artifact contains no package result")
 	}
 
 	identity := selected.Package
@@ -115,6 +115,9 @@ func ImportOSVScanner(reader io.Reader, run RunIdentity) ([]Observation, error) 
 	}
 	if err := validateExactValue("OSV package version", identity.Version); err != nil {
 		return nil, err
+	}
+	if identity.Name != run.Package || identity.Version != run.PackageVersion {
+		return nil, errors.New("OSV package/version does not match run identity")
 	}
 	wantEcosystem := run.DistributionID + ":" + run.Release
 	if !strings.EqualFold(identity.Ecosystem, wantEcosystem) {

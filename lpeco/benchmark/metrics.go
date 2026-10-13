@@ -41,13 +41,20 @@ type EvaluationRow struct {
 	Observation *Observation   `json:"observation,omitempty"`
 	Diagnostics []string       `json:"diagnostics"`
 	run         RunIdentity
+	product     bool
 }
 
 type MetricSet struct {
 	Affected ConfusionMetrics `json:"affected"`
 	Fixed    ConfusionMetrics `json:"fixed"`
 	Path     PathMetrics      `json:"path"`
+	Coverage CoverageMetrics  `json:"coverage"`
 	Outcomes OutcomeMetrics   `json:"outcomes"`
+}
+
+type CoverageMetrics struct {
+	StatusExact Ratio `json:"status_exact"`
+	StaleExact  Ratio `json:"stale_exact"`
 }
 
 type ConfusionMatrix struct {
@@ -165,7 +172,7 @@ func Evaluate(input Manifest, observations []Observation) (Report, error) {
 	for _, run := range manifest.Runs {
 		runs[run.ID] = run
 	}
-	byRun, err := validateObservations(observations, runs)
+	byRun, err := validateObservations(observations, runs, tools)
 	if err != nil {
 		return Report{}, err
 	}
@@ -177,7 +184,7 @@ func Evaluate(input Manifest, observations []Observation) (Report, error) {
 		observation, found := byRun[run.ID]
 		row := EvaluationRow{
 			RunID: run.ID, ScenarioID: run.ScenarioID, ToolID: run.ToolID, Transport: run.Transport,
-			Eligible: run.Eligible, Expected: scenario.Expected, run: run,
+			Eligible: run.Eligible, Expected: scenario.Expected, run: run, product: run.ToolID == "lpeco",
 		}
 		if found {
 			copy := observation
@@ -209,7 +216,10 @@ func Evaluate(input Manifest, observations []Observation) (Report, error) {
 	for _, toolID := range toolIDs {
 		rows := rowsByTool[toolID]
 		sort.Slice(rows, func(i, j int) bool { return rows[i].RunID < rows[j].RunID })
-		toolReport := evaluateTool(tools[toolID], rows)
+		toolReport, err := evaluateTool(tools[toolID], rows)
+		if err != nil {
+			return Report{}, fmt.Errorf("evaluate tool %q: %w", toolID, err)
+		}
 		if tools[toolID].NotRun && len(rows) == 0 {
 			toolReport.Diagnostics = append(toolReport.Diagnostics, "optional baseline tool is explicitly not run")
 		}
@@ -235,7 +245,7 @@ func cloneAndValidateManifest(input Manifest) (Manifest, error) {
 	return manifest, nil
 }
 
-func validateObservations(values []Observation, runs map[string]RunIdentity) (map[string]Observation, error) {
+func validateObservations(values []Observation, runs map[string]RunIdentity, tools map[string]ToolIdentity) (map[string]Observation, error) {
 	byRun := make(map[string]Observation, len(values))
 	ids := make(map[string]struct{}, len(values))
 	for index, value := range values {
@@ -259,11 +269,32 @@ func validateObservations(values []Observation, runs map[string]RunIdentity) (ma
 		if value.ScenarioID != run.ScenarioID || value.ToolID != run.ToolID {
 			return nil, fmt.Errorf("observation %q does not match run tool/scenario identity", value.ID)
 		}
+		if value.RunIdentitySHA256 != RunIdentityDigest(run) {
+			return nil, fmt.Errorf("observation %q does not match the canonical run identity", value.ID)
+		}
+		if value.Release != run.Release {
+			return nil, fmt.Errorf("observation %q release does not match run identity", value.ID)
+		}
 		if !oneOf(value.Outcome, "complete", "unknown", "unsupported", "error", "timeout", "crash", "parse_error") {
 			return nil, fmt.Errorf("observation %q has unsupported outcome %q", value.ID, value.Outcome)
 		}
 		if value.RuntimeMillis < 0 || value.RemoteCommands < 0 || value.OutputBytes < 0 || value.AdapterFailures < 0 || value.TargetWrites < 0 || value.TargetEgress < 0 {
 			return nil, fmt.Errorf("observation %q contains a negative resource or safety counter", value.ID)
+		}
+		if !oneOf(value.ResourceMeasurement, MeasurementMeasured, MeasurementUnavailable) {
+			return nil, fmt.Errorf("observation %q has unsupported resource measurement status %q", value.ID, value.ResourceMeasurement)
+		}
+		if !oneOf(value.SafetyMeasurement, MeasurementMeasured, MeasurementUnavailable) {
+			return nil, fmt.Errorf("observation %q has unsupported safety measurement status %q", value.ID, value.SafetyMeasurement)
+		}
+		if err := validateIdentifier("measurement provenance", value.MeasurementProvenance); err != nil {
+			return nil, fmt.Errorf("observation %q: %w", value.ID, err)
+		}
+		if value.ResourceMeasurement == MeasurementUnavailable && (value.RuntimeMillis != 0 || value.RemoteCommands != 0 || value.OutputBytes != 0 || value.AdapterFailures != 0) {
+			return nil, fmt.Errorf("observation %q has resource counters without a measurement", value.ID)
+		}
+		if value.SafetyMeasurement == MeasurementUnavailable && (value.TargetWrites != 0 || value.TargetEgress != 0) {
+			return nil, fmt.Errorf("observation %q has safety counters without a measurement", value.ID)
 		}
 		if value.Outcome == "complete" {
 			if !oneOf(value.MatchState, "affected", "fixed", "not_affected", "unknown", "none") {
@@ -272,10 +303,40 @@ func validateObservations(values []Observation, runs map[string]RunIdentity) (ma
 			if !oneOf(value.PathTier, "P1", "P2", "match_only", "none") {
 				return nil, fmt.Errorf("observation %q has unsupported path tier %q", value.ID, value.PathTier)
 			}
+			if value.MatchState != "affected" && value.PathTier != "none" {
+				return nil, fmt.Errorf("observation %q claims a privilege path without an affected match", value.ID)
+			}
 		} else {
 			if !oneOf(value.MatchState, "", "unknown", "none") || !oneOf(value.PathTier, "", "none") {
 				return nil, fmt.Errorf("non-complete observation %q claims a scored state or path", value.ID)
 			}
+		}
+		_, toolExists := tools[run.ToolID]
+		if !toolExists {
+			return nil, fmt.Errorf("observation %q references a run with unknown tool %q", value.ID, run.ToolID)
+		}
+		product := run.ToolID == "lpeco"
+		if !product && value.PathTier != "none" && value.PathTier != "" {
+			return nil, fmt.Errorf("baseline observation %q cannot claim a privilege-path tier", value.ID)
+		}
+		if product {
+			if !oneOf(value.CoverageStatus, "complete", "incomplete", "unsupported", "not_run", "disabled", "legacy_not_requested") {
+				return nil, fmt.Errorf("product observation %q has unsupported coverage status %q", value.ID, value.CoverageStatus)
+			}
+			if value.SnapshotStale == nil {
+				return nil, fmt.Errorf("product observation %q lacks snapshot staleness state", value.ID)
+			}
+		} else if value.CoverageStatus != CoverageUnavailable || value.SnapshotStale != nil {
+			return nil, fmt.Errorf("baseline observation %q cannot claim LPECO coverage state", value.ID)
+		}
+		if (value.Package == "") != (value.Version == "") {
+			return nil, fmt.Errorf("observation %q must provide package and version together", value.ID)
+		}
+		if value.Package != "" && (value.Package != run.Package || value.Version != run.PackageVersion) {
+			return nil, fmt.Errorf("observation %q package/version does not match run identity", value.ID)
+		}
+		if value.Outcome == "complete" && value.Package == "" {
+			return nil, fmt.Errorf("observation %q lacks exact package/version context", value.ID)
 		}
 		for label, content := range map[string]string{"package": value.Package, "version": value.Version, "release": value.Release} {
 			if err := validateHygieneString(content); err != nil {
@@ -292,7 +353,7 @@ func validateObservations(values []Observation, runs map[string]RunIdentity) (ma
 	return byRun, nil
 }
 
-func evaluateTool(tool ToolIdentity, rows []EvaluationRow) ToolReport {
+func evaluateTool(tool ToolIdentity, rows []EvaluationRow) (ToolReport, error) {
 	report := ToolReport{ToolID: tool.ID, ToolName: tool.Name, Rows: rows}
 	var eligible []EvaluationRow
 	for _, row := range rows {
@@ -306,14 +367,21 @@ func evaluateTool(tool ToolIdentity, rows []EvaluationRow) ToolReport {
 			}
 		}
 	}
-	report.Micro, report.Resources, report.Safety = aggregateRows(eligible)
-	report.Strata = stratifyRows(eligible)
+	var err error
+	report.Micro, report.Resources, report.Safety, err = aggregateRows(eligible)
+	if err != nil {
+		return ToolReport{}, err
+	}
+	report.Strata, err = stratifyRows(eligible)
+	if err != nil {
+		return ToolReport{}, err
+	}
 	report.Macro = macroFromStrata(report.Strata)
 	report.CrossTransport = transportConsistency(eligible)
-	return report
+	return report, nil
 }
 
-func aggregateRows(rows []EvaluationRow) (MetricSet, ResourceMetrics, SafetyMetrics) {
+func aggregateRows(rows []EvaluationRow) (MetricSet, ResourceMetrics, SafetyMetrics, error) {
 	var metrics MetricSet
 	outcomes := make(map[string]int)
 	pathCorrect := make(map[string]int)
@@ -322,26 +390,54 @@ func aggregateRows(rows []EvaluationRow) (MetricSet, ResourceMetrics, SafetyMetr
 	resources := ResourceMetrics{ExpectedRuns: len(rows)}
 	safety := SafetyMetrics{ExpectedRuns: len(rows)}
 	exact, adjacent, scoredPaths := 0, 0, 0
+	coverageExpected, coverageCorrect, staleExpected, staleCorrect := 0, 0, 0, 0
 	for _, row := range rows {
 		outcome := row.Outcome
 		if outcome == "" {
 			outcome = "missing"
 		}
 		outcomes[outcome]++
-		if row.Observation != nil {
+		if row.product {
+			coverageExpected++
+			if row.Observation != nil && row.Observation.CoverageStatus == row.Expected.CoverageStatus {
+				coverageCorrect++
+			}
+			if row.Expected.CoverageStatus == "complete" {
+				staleExpected++
+				if row.Observation != nil && row.Observation.SnapshotStale != nil && *row.Observation.SnapshotStale == row.Expected.Stale {
+					staleCorrect++
+				}
+			}
+		}
+		if row.Observation != nil && row.Observation.ResourceMeasurement == MeasurementMeasured {
 			observation := row.Observation
 			resources.ObservedRuns++
-			resources.RuntimeMillisTotal += observation.RuntimeMillis
-			resources.RemoteCommands += observation.RemoteCommands
-			resources.OutputBytesTotal += observation.OutputBytes
-			resources.AdapterFailures += observation.AdapterFailures
+			if err := addCounter(&resources.RuntimeMillisTotal, observation.RuntimeMillis); err != nil {
+				return MetricSet{}, ResourceMetrics{}, SafetyMetrics{}, fmt.Errorf("runtime milliseconds overflow: %w", err)
+			}
+			if err := addCounter(&resources.RemoteCommands, observation.RemoteCommands); err != nil {
+				return MetricSet{}, ResourceMetrics{}, SafetyMetrics{}, fmt.Errorf("remote commands overflow: %w", err)
+			}
+			if err := addCounter(&resources.OutputBytesTotal, observation.OutputBytes); err != nil {
+				return MetricSet{}, ResourceMetrics{}, SafetyMetrics{}, fmt.Errorf("output bytes overflow: %w", err)
+			}
+			if err := addCounter(&resources.AdapterFailures, observation.AdapterFailures); err != nil {
+				return MetricSet{}, ResourceMetrics{}, SafetyMetrics{}, fmt.Errorf("adapter failures overflow: %w", err)
+			}
 			runtimes = append(runtimes, observation.RuntimeMillis)
 			outputSizes = append(outputSizes, observation.OutputBytes)
-			safety.ObservedRuns++
-			safety.TargetWrites += observation.TargetWrites
-			safety.TargetEgress += observation.TargetEgress
 		}
-		if outcome != "complete" || row.Observation == nil {
+		if row.Observation != nil && row.Observation.SafetyMeasurement == MeasurementMeasured {
+			observation := row.Observation
+			safety.ObservedRuns++
+			if err := addCounter(&safety.TargetWrites, observation.TargetWrites); err != nil {
+				return MetricSet{}, ResourceMetrics{}, SafetyMetrics{}, fmt.Errorf("target writes overflow: %w", err)
+			}
+			if err := addCounter(&safety.TargetEgress, observation.TargetEgress); err != nil {
+				return MetricSet{}, ResourceMetrics{}, SafetyMetrics{}, fmt.Errorf("target egress overflow: %w", err)
+			}
+		}
+		if outcome != "complete" || row.Observation == nil || row.Expected.CoverageStatus != "complete" || (row.product && row.Observation.CoverageStatus != "complete") {
 			continue
 		}
 		observation := row.Observation
@@ -368,6 +464,10 @@ func aggregateRows(rows []EvaluationRow) (MetricSet, ResourceMetrics, SafetyMetr
 		MatchOnly: ratio(pathCorrect["match_only"], pathExpected["match_only"]),
 		None:      ratio(pathCorrect["none"], pathExpected["none"]),
 	}
+	metrics.Coverage = CoverageMetrics{
+		StatusExact: ratio(coverageCorrect, coverageExpected),
+		StaleExact:  ratio(staleCorrect, staleExpected),
+	}
 	total := len(rows)
 	toolErrors := outcomes["error"] + outcomes["timeout"] + outcomes["crash"] + outcomes["parse_error"]
 	metrics.Outcomes = OutcomeMetrics{
@@ -386,7 +486,15 @@ func aggregateRows(rows []EvaluationRow) (MetricSet, ResourceMetrics, SafetyMetr
 	safety.ZeroWrites = safety.ExpectedRuns > 0 && safety.ObservedRuns == safety.ExpectedRuns && safety.TargetWrites == 0
 	safety.ZeroEgress = safety.ExpectedRuns > 0 && safety.ObservedRuns == safety.ExpectedRuns && safety.TargetEgress == 0
 	safety.Passed = safety.ZeroWrites && safety.ZeroEgress
-	return metrics, resources, safety
+	return metrics, resources, safety, nil
+}
+
+func addCounter(total *int64, value int64) error {
+	if value > math.MaxInt64-*total {
+		return fmt.Errorf("%d + %d exceeds int64", *total, value)
+	}
+	*total += value
+	return nil
 }
 
 func accumulateBinary(matrix *ConfusionMatrix, expected, observed, positive string) {
@@ -455,13 +563,22 @@ func normalizedOutcome(observation *Observation) string {
 	if observation == nil {
 		return "missing"
 	}
+	if observation.Outcome != "complete" && observation.Outcome != "unknown" {
+		return observation.Outcome
+	}
+	switch observation.CoverageStatus {
+	case "unsupported":
+		return "unsupported"
+	case "incomplete", "not_run", "disabled", "legacy_not_requested":
+		return "unknown"
+	}
 	if observation.Outcome == "complete" && observation.MatchState == "unknown" {
 		return "unknown"
 	}
 	return observation.Outcome
 }
 
-func stratifyRows(rows []EvaluationRow) []StratumReport {
+func stratifyRows(rows []EvaluationRow) ([]StratumReport, error) {
 	type key struct{ dimension, value string }
 	groups := make(map[key][]EvaluationRow)
 	for _, row := range rows {
@@ -487,13 +604,16 @@ func stratifyRows(rows []EvaluationRow) []StratumReport {
 	})
 	result := make([]StratumReport, 0, len(keys))
 	for _, value := range keys {
-		micro, resources, safety := aggregateRows(groups[value])
+		micro, resources, safety, err := aggregateRows(groups[value])
+		if err != nil {
+			return nil, fmt.Errorf("stratum %s=%s: %w", value.dimension, value.value, err)
+		}
 		result = append(result, StratumReport{
 			Dimension: value.dimension, Value: value.value, Rows: len(groups[value]),
 			Micro: micro, Resources: resources, Safety: safety,
 		})
 	}
-	return result
+	return result, nil
 }
 
 func macroFromStrata(strata []StratumReport) MacroMetrics {
@@ -542,7 +662,10 @@ func finalizeMacro(target *MacroRatio) {
 
 func transportConsistency(rows []EvaluationRow) ConsistencyMetrics {
 	type groupKey struct{ tool, scenario string }
-	type semantic struct{ outcome, match, tier string }
+	type semantic struct {
+		outcome, match, tier, packageName, version, coverage string
+		stale, staleKnown                                    bool
+	}
 	groups := make(map[groupKey]map[string]semantic)
 	for _, row := range rows {
 		if row.Observation == nil {
@@ -552,7 +675,16 @@ func transportConsistency(rows []EvaluationRow) ConsistencyMetrics {
 		if groups[key] == nil {
 			groups[key] = make(map[string]semantic)
 		}
-		groups[key][row.Transport] = semantic{outcome: row.Outcome, match: row.Observation.MatchState, tier: row.Observation.PathTier}
+		groups[key][row.Transport] = semantic{
+			outcome: row.Outcome, match: row.Observation.MatchState, tier: row.Observation.PathTier,
+			packageName: row.Observation.Package, version: row.Observation.Version, coverage: row.Observation.CoverageStatus,
+			staleKnown: row.Observation.SnapshotStale != nil,
+		}
+		if row.Observation.SnapshotStale != nil {
+			value := groups[key][row.Transport]
+			value.stale = *row.Observation.SnapshotStale
+			groups[key][row.Transport] = value
+		}
 	}
 	var result ConsistencyMetrics
 	for _, transports := range groups {

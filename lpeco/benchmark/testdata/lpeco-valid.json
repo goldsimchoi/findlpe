@@ -40,18 +40,57 @@
       "category": "known-vulnerability",
       "priority": "P1",
       "confidence": "high",
-      "current_principal": {},
-      "target_principal": {},
-      "path_nodes": [],
-      "evidence_ids": [],
+      "current_principal": {"id": "node-current", "kind": "Principal"},
+      "target_principal": {"id": "node-root", "kind": "Principal"},
+      "path_nodes": [
+        {"id": "node-current", "kind": "Principal"},
+        {"id": "node-root", "kind": "Principal"}
+      ],
+      "evidence_ids": ["evidence-fixture"],
       "related_match_ids": ["match-demo"],
       "missing_facts": [],
-      "validation_status": "read_only",
+      "validation_status": "read_only_validated",
       "summary": "reviewed fixture path"
     }
   ],
-  "evidence": [],
-  "graph": {},
+  "evidence": [
+    {
+      "id": "evidence-fixture",
+      "session_id": "benchmark-fixture",
+      "probe_id": "fixture",
+      "variant_id": "default",
+      "adapter": "fixture",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "started_at": "2099-01-01T00:00:00Z",
+      "finished_at": "2099-01-01T00:00:01Z",
+      "status": "complete",
+      "exit_code": 0,
+      "merged_output": true,
+      "truncated": false,
+      "relative_path": "evidence-fixture.txt"
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {
+        "id": "node-current",
+        "kind": "Principal",
+        "source_collector": "fixture",
+        "evidence_ids": ["evidence-fixture"],
+        "confidence": "high"
+      },
+      {
+        "id": "node-root",
+        "kind": "Principal",
+        "source_collector": "fixture",
+        "evidence_ids": ["evidence-fixture"],
+        "confidence": "high"
+      }
+    ],
+    "edges": [],
+    "facts": []
+  },
   "graph_diagnostics": [],
   "rule_diagnostics": [],
   "known_vulnerabilities": {

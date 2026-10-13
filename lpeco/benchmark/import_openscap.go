@@ -66,6 +66,12 @@ func ImportOpenSCAP(reader io.Reader, run RunIdentity) ([]Observation, error) {
 	if err := validateExactValue("OpenSCAP package version", metadata.packageVersion); err != nil {
 		return nil, err
 	}
+	if metadata.packageName != run.Package || metadata.packageVersion != run.PackageVersion {
+		return nil, errors.New("OpenSCAP package/version does not match run identity")
+	}
+	if len(results) == 0 {
+		return nil, errors.New("complete OpenSCAP artifact contains no definition result")
+	}
 
 	hasTrue, hasFalse, hasUnknown, hasError := false, false, false, false
 	for _, result := range results {
@@ -226,7 +232,12 @@ func rejectOpenSCAPAttributes(attributes []xml.Attr) error {
 func openSCAPAttributes(attributes []xml.Attr, allowed map[string]bool) (map[string]string, error) {
 	values := make(map[string]string, len(attributes))
 	for _, attribute := range attributes {
-		if attribute.Name.Space == "xmlns" || attribute.Name.Local == "xmlns" || attribute.Name.Local == "schemaLocation" {
+		if err := validateHygieneString(attribute.Value); err != nil {
+			return nil, fmt.Errorf("OpenSCAP attribute %q: %w", attribute.Name.Local, err)
+		}
+		isNamespaceDeclaration := attribute.Name.Space == "xmlns" || attribute.Name.Local == "xmlns"
+		isSchemaLocation := attribute.Name.Space == "http://www.w3.org/2001/XMLSchema-instance" && attribute.Name.Local == "schemaLocation"
+		if isNamespaceDeclaration || isSchemaLocation {
 			continue
 		}
 		if !allowed[attribute.Name.Local] {
@@ -234,9 +245,6 @@ func openSCAPAttributes(attributes []xml.Attr, allowed map[string]bool) (map[str
 		}
 		if _, duplicate := values[attribute.Name.Local]; duplicate {
 			return nil, fmt.Errorf("duplicate OpenSCAP attribute %q", attribute.Name.Local)
-		}
-		if err := validateHygieneString(attribute.Value); err != nil {
-			return nil, fmt.Errorf("OpenSCAP attribute %q: %w", attribute.Name.Local, err)
 		}
 		values[attribute.Name.Local] = attribute.Value
 	}

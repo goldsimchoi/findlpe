@@ -64,3 +64,7 @@ begin.
   pinning, official-reference allowlisting, and terminal control escaping.
 - The minimum Go patch release is 1.26.9, which includes the standard-library
   fixes required by the repository vulnerability gate.
+- Benchmark scoring binds normalized observations to immutable ground-truth
+  semantics and complete run/package identities, rejects contradictory scanner
+  joins and overflowing counters, and never treats unavailable safety
+  measurement as a passing zero.

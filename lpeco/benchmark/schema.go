@@ -4,6 +4,8 @@ package benchmark
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,10 +20,14 @@ import (
 )
 
 const (
-	ManifestSchemaVersion = 1
-	CoreGroundTruthPath   = "testdata/known-vulnerability/scenarios.json"
-	CoreGroundTruthSHA256 = "sha256:c1a53191b6bb536bc1cfc970c1e79eb0680465b2c2672756c5b1a48c2b35fae1"
-	maxManifestBytes      = 8 << 20
+	ManifestSchemaVersion          = 1
+	CoreGroundTruthPath            = "testdata/known-vulnerability/scenarios.json"
+	CoreGroundTruthSHA256          = "sha256:c1a53191b6bb536bc1cfc970c1e79eb0680465b2c2672756c5b1a48c2b35fae1"
+	CoreGroundTruthSemanticsSHA256 = "sha256:9891cf35a05cee07e5f4f810f64a60bce30602ad29f66b5fd8d14667e933f765"
+	maxManifestBytes               = 8 << 20
+	MeasurementMeasured            = "measured"
+	MeasurementUnavailable         = "unavailable"
+	CoverageUnavailable            = "unavailable"
 )
 
 var (
@@ -88,6 +94,14 @@ type ExpectedResult struct {
 	Stale          bool   `json:"stale"`
 }
 
+type coreGroundTruthScenario struct {
+	ID            string         `json:"id"`
+	ScenarioClass string         `json:"scenario_class"`
+	Distribution  Distribution   `json:"distribution"`
+	PackageClass  string         `json:"package_class"`
+	Expected      ExpectedResult `json:"expected"`
+}
+
 // RunIdentity carries every value needed to reproduce one tool/scenario lane.
 // Eligible and Diagnostics are derived by validation and are never accepted
 // from an artifact.
@@ -105,6 +119,8 @@ type RunIdentity struct {
 	DistributionID         string   `json:"distribution_id,omitempty"`
 	Release                string   `json:"release,omitempty"`
 	PackageClass           string   `json:"package_class,omitempty"`
+	Package                string   `json:"package,omitempty"`
+	PackageVersion         string   `json:"package_version,omitempty"`
 	ScenarioClass          string   `json:"scenario_class,omitempty"`
 	Acquisition            string   `json:"acquisition,omitempty"`
 	DisposableCommand      []string `json:"disposable_command,omitempty"`
@@ -116,24 +132,38 @@ type RunIdentity struct {
 // Observation is the deliberately small interchange record consumed by the
 // evaluator. Importers populate it without retaining raw scanner evidence.
 type Observation struct {
-	SchemaVersion   int      `json:"schema_version"`
-	ID              string   `json:"id"`
-	RunID           string   `json:"run_id"`
-	ScenarioID      string   `json:"scenario_id"`
-	ToolID          string   `json:"tool_id"`
-	Outcome         string   `json:"outcome"`
-	MatchState      string   `json:"match_state"`
-	PathTier        string   `json:"path_tier"`
-	Package         string   `json:"package,omitempty"`
-	Version         string   `json:"version,omitempty"`
-	Release         string   `json:"release,omitempty"`
-	RuntimeMillis   int64    `json:"runtime_millis"`
-	RemoteCommands  int64    `json:"remote_commands"`
-	OutputBytes     int64    `json:"output_bytes"`
-	AdapterFailures int64    `json:"adapter_failures"`
-	TargetWrites    int64    `json:"target_writes"`
-	TargetEgress    int64    `json:"target_egress"`
-	DiagnosticCodes []string `json:"diagnostic_codes,omitempty"`
+	SchemaVersion         int      `json:"schema_version"`
+	ID                    string   `json:"id"`
+	RunID                 string   `json:"run_id"`
+	RunIdentitySHA256     string   `json:"run_identity_sha256"`
+	ScenarioID            string   `json:"scenario_id"`
+	ToolID                string   `json:"tool_id"`
+	Outcome               string   `json:"outcome"`
+	MatchState            string   `json:"match_state"`
+	PathTier              string   `json:"path_tier"`
+	Package               string   `json:"package,omitempty"`
+	Version               string   `json:"version,omitempty"`
+	Release               string   `json:"release"`
+	CoverageStatus        string   `json:"coverage_status"`
+	SnapshotStale         *bool    `json:"snapshot_stale,omitempty"`
+	ResourceMeasurement   string   `json:"resource_measurement"`
+	SafetyMeasurement     string   `json:"safety_measurement"`
+	MeasurementProvenance string   `json:"measurement_provenance"`
+	RuntimeMillis         int64    `json:"runtime_millis"`
+	RemoteCommands        int64    `json:"remote_commands"`
+	OutputBytes           int64    `json:"output_bytes"`
+	AdapterFailures       int64    `json:"adapter_failures"`
+	TargetWrites          int64    `json:"target_writes"`
+	TargetEgress          int64    `json:"target_egress"`
+	DiagnosticCodes       []string `json:"diagnostic_codes,omitempty"`
+}
+
+// RunIdentityDigest binds a normalized observation to every reproducibility
+// field in its run identity, not merely to the human-readable run ID.
+func RunIdentityDigest(run RunIdentity) string {
+	body, _ := json.Marshal(run)
+	digest := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func LoadManifest(reader io.Reader) (Manifest, error) {
@@ -207,8 +237,12 @@ func (manifest *Manifest) Validate() error {
 		if strings.TrimSpace(tool.Name) == "" {
 			return fmt.Errorf("tool %q has an empty name", tool.ID)
 		}
-		if tool.Role != "product" && tool.Role != "baseline" {
-			return fmt.Errorf("tool %q has unsupported role %q", tool.ID, tool.Role)
+		expectedRole := "baseline"
+		if tool.ID == "lpeco" {
+			expectedRole = "product"
+		}
+		if tool.Role != expectedRole {
+			return fmt.Errorf("tool %q must have role %q, got %q", tool.ID, expectedRole, tool.Role)
 		}
 		if tool.NotRun {
 			if !tool.Optional || tool.Role != "baseline" || tool.Version != "" || tool.SHA256 != "" {
@@ -226,6 +260,9 @@ func (manifest *Manifest) Validate() error {
 	}
 	if len(tools) == 0 {
 		return errors.New("manifest contains no tools")
+	}
+	if _, exists := tools["lpeco"]; !exists {
+		return errors.New("manifest requires the lpeco product tool")
 	}
 
 	scenarios := make(map[string]Scenario, len(manifest.Scenarios))
@@ -251,6 +288,9 @@ func (manifest *Manifest) Validate() error {
 			return fmt.Errorf("reviewed ground-truth scenario %q is missing", id)
 		}
 	}
+	if digest := groundTruthSemanticsDigest(manifest.Scenarios); digest != CoreGroundTruthSemanticsSHA256 {
+		return fmt.Errorf("ground-truth scenario metadata digest %q does not match reviewed semantics %q", digest, CoreGroundTruthSemanticsSHA256)
+	}
 	if err := validateScenarioDependencies(scenarios); err != nil {
 		return err
 	}
@@ -272,6 +312,25 @@ func (manifest *Manifest) Validate() error {
 		}
 	}
 	return nil
+}
+
+func groundTruthSemanticsDigest(scenarios []Scenario) string {
+	values := make([]coreGroundTruthScenario, 0, len(scenarios))
+	for _, scenario := range scenarios {
+		values = append(values, coreGroundTruthScenario{
+			ID: scenario.GroundTruthID, ScenarioClass: scenario.ScenarioClass,
+			Distribution: scenario.Distribution, PackageClass: scenario.PackageClass, Expected: scenario.Expected,
+		})
+	}
+	return coreGroundTruthSemanticsDigest(values)
+}
+
+func coreGroundTruthSemanticsDigest(values []coreGroundTruthScenario) string {
+	values = append([]coreGroundTruthScenario(nil), values...)
+	sort.Slice(values, func(first, second int) bool { return values[first].ID < values[second].ID })
+	body, _ := json.Marshal(values)
+	digest := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func validateScenario(index int, scenario Scenario) error {
@@ -408,6 +467,12 @@ func runDiagnostics(run RunIdentity, tools map[string]ToolIdentity, scenarios ma
 	}
 	if !oneOf(run.Acquisition, "native", "preproduced", "manual") {
 		result = append(result, "acquisition is missing or unsupported")
+	}
+	if validateExactValue("package", run.Package) != nil || validateHygieneString(run.Package) != nil {
+		result = append(result, "package is missing, invalid, or unsafe")
+	}
+	if validateExactValue("package version", run.PackageVersion) != nil || validateHygieneString(run.PackageVersion) != nil {
+		result = append(result, "package version is missing, invalid, or unsafe")
 	}
 	sort.Strings(result)
 	return result
