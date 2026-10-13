@@ -40,6 +40,30 @@ func TestContainerFixtureRequiresDisposableGuard(t *testing.T) {
 	}
 }
 
+func TestContainerDockerfilesDeclareDisposableBuildMarker(t *testing.T) {
+	for _, fixture := range []string{"debian", "alpine"} {
+		t.Run(fixture, func(t *testing.T) {
+			content, err := os.ReadFile(filepath.Join("container", "Dockerfile."+fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dockerfile := string(content)
+			setupOffset := strings.Index(dockerfile, "/usr/local/libexec/lpeco-fixture setup")
+			markerOffset := strings.Index(dockerfile, "&& : > /run/.containerenv")
+			confirmationOffset := strings.Index(dockerfile, "LPECO_DISPOSABLE_FIXTURE=confirmed")
+			if setupOffset < 0 {
+				t.Fatal("Dockerfile does not run fixture setup")
+			}
+			if markerOffset < 0 || markerOffset > setupOffset {
+				t.Fatal("Dockerfile must create /run/.containerenv before fixture setup")
+			}
+			if confirmationOffset < 0 || confirmationOffset > setupOffset {
+				t.Fatal("Dockerfile must confirm the disposable fixture before setup")
+			}
+		})
+	}
+}
+
 func TestTargetPersistentStateUnchanged(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "managed")

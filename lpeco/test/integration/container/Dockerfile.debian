@@ -9,7 +9,9 @@ COPY lpeco /usr/local/bin/lpeco
 COPY fixture.sh /usr/local/libexec/lpeco-fixture
 
 ENV LPECO_FIXTURE_KIND=debian LPECO_DISPOSABLE_FIXTURE=confirmed
-RUN chmod 0755 /usr/local/bin/lpeco /usr/local/libexec/lpeco-fixture \
+RUN mkdir -p /run \
+    && : > /run/.containerenv \
+    && chmod 0755 /usr/local/bin/lpeco /usr/local/libexec/lpeco-fixture \
     && useradd --create-home --uid 1000 --shell /bin/sh lpeco \
     && /usr/local/libexec/lpeco-fixture setup
 
