@@ -7,10 +7,13 @@ import (
 )
 
 type ObservationSet struct {
-	WorkingDirectory string                       `json:"working_directory,omitempty"`
-	Stats            map[string][]StatObservation `json:"stats"`
-	ACLs             map[string]ACLObservation    `json:"acls"`
-	Mounts           []MountObservation           `json:"mounts"`
+	WorkingDirectory          string                       `json:"working_directory,omitempty"`
+	Stats                     map[string][]StatObservation `json:"stats"`
+	ACLs                      map[string]ACLObservation    `json:"acls"`
+	Mounts                    []MountObservation           `json:"mounts"`
+	MountInventoryComplete    bool                         `json:"mount_inventory_complete"`
+	MountInventoryEvidenceIDs []string                     `json:"mount_inventory_evidence_ids,omitempty"`
+	MountInventoryMissing     []string                     `json:"mount_inventory_missing,omitempty"`
 }
 
 type SymlinkStep struct {

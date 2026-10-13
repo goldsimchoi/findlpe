@@ -38,6 +38,12 @@ begin.
 
 - Raw-shell framing, bounded retries, and resume semantics preserve partial
   evidence instead of treating an incomplete exchange as success.
+- Mount inventory parse failures and partial observations now fail closed
+  instead of falling back to a less-specific writable mount.
+- P0 and read-only-validated candidates now require complete, high-confidence
+  evidence at both ranking and model-validation boundaries.
+- Raw-shell exit-status parsing is bounded to the protocol's three-digit
+  range and rejects malformed suffixes without draining unbounded input.
 
 ### Security
 

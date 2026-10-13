@@ -1,6 +1,10 @@
 package path
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/normalone/lpeco/internal/adapter"
+)
 
 func TestParseMountInfoDecodesPathsAndClassifiesMounts(t *testing.T) {
 	input := []byte("36 25 0:32 / / rw,nosuid - ext4 /dev/vda1 rw\n" +
@@ -31,5 +35,18 @@ func TestMountSelectionHonorsPathBoundaries(t *testing.T) {
 	mounts := []MountObservation{{MountPoint: "/", EvidenceIDs: []string{"e"}}, {MountPoint: "/srv/app", EvidenceIDs: []string{"e"}}}
 	if mount, _ := MountForPath("/srv/application", mounts); mount.MountPoint != "/" {
 		t.Fatalf("prefix without boundary selected nested mount: %#v", mount)
+	}
+}
+
+func TestCollectorRejectsIncompleteMountInventory(t *testing.T) {
+	input := []byte("36 25 0:32 / / rw - ext4 /dev/vda1 rw\n" +
+		"malformed child mount that could hide a read-only boundary\n")
+
+	facts, err := (Collector{}).Parse(MountInfoDefinition(), adapter.ExecResult{Stdout: input}, "e-mount")
+	if err == nil {
+		t.Fatal("Collector.Parse accepted an incomplete mount inventory")
+	}
+	if len(facts) != 0 {
+		t.Fatalf("Collector.Parse facts = %#v, want none for an incomplete inventory", facts)
 	}
 }

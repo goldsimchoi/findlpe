@@ -63,6 +63,34 @@ func TestParseFrameTruncatesButConsumesEndMarker(t *testing.T) {
 	}
 }
 
+func TestParseFrameRejectsOversizedUnterminatedExitStatusWithoutDrainingInput(t *testing.T) {
+	nonce := "cab005e"
+	prefix := append(append(append([]byte{}, startMarker(nonce)...), '\n'), endPrefix(nonce)...)
+	reader := &oneByteReader{data: append(prefix, bytes.Repeat([]byte{'9'}, 4096)...)}
+
+	_, err := parseFrame(reader, nonce, 1024)
+	if !errors.Is(err, ErrMalformedExit) {
+		t.Fatalf("parseFrame error = %v, want %v", err, ErrMalformedExit)
+	}
+	if suffixReads := reader.offset - len(prefix); suffixReads > 4 {
+		t.Fatalf("parseFrame consumed %d exit-status bytes, want at most 4", suffixReads)
+	}
+}
+
+type oneByteReader struct {
+	data   []byte
+	offset int
+}
+
+func (r *oneByteReader) Read(buffer []byte) (int, error) {
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	buffer[0] = r.data[r.offset]
+	r.offset++
+	return 1, nil
+}
+
 func framedTranscript(nonce string, output []byte, exit string) []byte {
 	data := append([]byte{}, startMarker(nonce)...)
 	data = append(data, '\n')

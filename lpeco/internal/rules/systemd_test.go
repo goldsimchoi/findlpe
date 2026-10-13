@@ -42,6 +42,28 @@ func TestRankNeverReturnsP0ForLowConfidenceOrUnresolvedEvidence(t *testing.T) {
 	}
 }
 
+func TestRankOnlyMarksCompleteHighConfidenceEvidenceReadOnlyValidated(t *testing.T) {
+	tests := []struct {
+		name        string
+		confidences []model.Confidence
+		missing     []string
+		want        model.ValidationStatus
+	}{
+		{name: "high confidence", confidences: []model.Confidence{model.ConfidenceHigh}, want: model.ValidationReadOnly},
+		{name: "medium confidence", confidences: []model.Confidence{model.ConfidenceMedium}, want: model.ValidationIncomplete},
+		{name: "low confidence", confidences: []model.Confidence{model.ConfidenceLow}, want: model.ValidationIncomplete},
+		{name: "missing fact", confidences: []model.Confidence{model.ConfidenceHigh}, missing: []string{"trigger timing unavailable"}, want: model.ValidationIncomplete},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := Rank(RankInput{ControlConfirmed: true, SemanticsResolved: true, Confidences: tt.confidences, MissingFacts: tt.missing})
+			if result.ValidationStatus != tt.want {
+				t.Fatalf("ValidationStatus = %q, want %q (%#v)", result.ValidationStatus, tt.want, result)
+			}
+		})
+	}
+}
+
 type ruleFixture struct {
 	Cases []fixtureCase `json:"cases"`
 }

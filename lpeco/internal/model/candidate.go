@@ -44,8 +44,8 @@ func (c Candidate) Validate() error {
 	if c.Confidence != ConfidenceHigh && c.Confidence != ConfidenceMedium && c.Confidence != ConfidenceLow {
 		return fmt.Errorf("unknown candidate confidence %q", c.Confidence)
 	}
-	if c.Priority == PriorityP0 && c.Confidence == ConfidenceLow {
-		return errors.New("P0 candidate cannot have low confidence")
+	if c.Priority == PriorityP0 && (c.Confidence != ConfidenceHigh || len(c.MissingFacts) > 0) {
+		return errors.New("P0 candidate requires high confidence and no missing facts")
 	}
 	if c.CurrentPrincipal.ID == "" {
 		return errors.New("current principal is required")
@@ -58,6 +58,9 @@ func (c Candidate) Validate() error {
 	}
 	if c.ValidationStatus != ValidationUnvalidated && c.ValidationStatus != ValidationReadOnly && c.ValidationStatus != ValidationIncomplete {
 		return fmt.Errorf("unknown validation status %q", c.ValidationStatus)
+	}
+	if c.ValidationStatus == ValidationReadOnly && (c.Confidence != ConfidenceHigh || len(c.MissingFacts) > 0) {
+		return errors.New("read-only validation requires high confidence and no missing facts")
 	}
 	if strings.TrimSpace(c.Summary) == "" {
 		return errors.New("candidate summary is required")

@@ -22,7 +22,7 @@ type RankResult struct {
 func Rank(input RankInput) RankResult {
 	confidence := aggregateConfidence(input.Confidences, input.MissingFacts)
 	result := RankResult{Priority: model.PriorityP2, Confidence: confidence, ValidationStatus: model.ValidationIncomplete}
-	if input.ControlConfirmed && input.SemanticsResolved && len(input.MissingFacts) == 0 {
+	if input.ControlConfirmed && input.SemanticsResolved && confidence == model.ConfidenceHigh && len(input.MissingFacts) == 0 {
 		result.ValidationStatus = model.ValidationReadOnly
 	}
 	if !input.PrivilegeBoundary || !input.ControlConfirmed {
