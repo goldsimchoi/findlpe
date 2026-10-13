@@ -22,7 +22,7 @@ require `lpeco/docs/adapter-protocol.md`.
 
 ## Prerequisites
 
-- Go 1.26 or newer
+- Go 1.26.9 or newer
 - Git
 - A Linux environment for the complete suite
 - Docker for integration fixtures that exercise containers

@@ -48,7 +48,7 @@ sh .github/scripts/check-pr-policy.sh \
 
 ## Local workflow
 
-Go 1.26 or newer is required. Run Go commands from `lpeco/`:
+Go 1.26.9 or newer is required. Run Go commands from `lpeco/`:
 
 ```sh
 make fmt

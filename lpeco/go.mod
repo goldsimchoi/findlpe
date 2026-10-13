@@ -1,6 +1,6 @@
 module github.com/normalone/lpeco
 
-go 1.26.7
+go 1.26.9
 
 require (
 	github.com/ulikunitz/xz v0.5.17
