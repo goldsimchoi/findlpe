@@ -64,8 +64,14 @@ setup_debian() {
     '  exit 0' \
     'fi' \
     'unit=' \
-    'for argument do unit=$argument; done' \
+    'property=' \
+    'for argument do' \
+    '  case "$argument" in --property=FragmentPath) property=FragmentPath ;; --property=DropInPaths) property=DropInPaths ;; esac' \
+    '  unit=$argument' \
+    'done' \
     'if [ "$operation" = show ]; then' \
+    '  if [ "$property" = FragmentPath ]; then printf "/etc/systemd/system/%s\n" "$unit"; exit 0; fi' \
+    '  if [ "$property" = DropInPaths ]; then printf "\n"; exit 0; fi' \
     '  worker_pid=$(/bin/cat /run/lpeco-fixture/worker.pid 2>/dev/null || printf 0)' \
     '  printf "Id=%s\\nNames=%s\\nLoadState=loaded\\nActiveState=active\\nSubState=running\\nUID=0\\nGID=0\\nUser=root\\nGroup=root\\n" "$unit" "$unit"' \
     '  case "$unit" in' \
@@ -167,8 +173,13 @@ run_scan() {
   su -s /bin/sh lpeco -c 'PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin /usr/local/bin/lpeco report container-fixture --format json --state-dir /tmp/lpeco-state' >/tmp/lpeco-report.json
 
   incomplete_probes=$(awk -F'"' '
-    /"probe_id":/ { probe=$4 }
-    /"status":/ && probe != "" { if ($4 != "complete") print probe; probe="" }
+    /"probe_id":/ { probe=$4; next }
+    /"status":/ && probe != "" {
+      if ($4 == "complete") complete[probe]=1
+      else incomplete[probe]=1
+      probe=""
+    }
+    END { for (probe in incomplete) if (!complete[probe]) print probe }
   ' /tmp/lpeco-state/container-fixture/session.json | sort -u)
   printf '%s\n' "$incomplete_probes" | while IFS= read -r probe_id; do
     case "$probe_id" in

@@ -1,4 +1,5 @@
-# /etc/systemd/system/file-only.service
+LPECO_SYSTEMD_CAT_V2
+SOURCE	2f6574632f73797374656d642f73797374656d2f66696c652d6f6e6c792e73657276696365	118
 [Unit]
 Description=File only service
 [Service]
@@ -6,3 +7,4 @@ User=root
 Type=oneshot
 ExecStart=/opt/file-only/run
 NoNewPrivileges=no
+END

@@ -85,6 +85,7 @@ func (r *runner) runDefinitions(ctx context.Context, phase Phase, planned []plan
 		variant, err := r.planner.Select(item.Definition, r.caps, r.result.Profile, policy)
 		if err != nil {
 			r.addIssue(phase, item.Definition.ID, "select probe variant: "+err.Error(), err)
+			outcome.Incomplete = true
 			continue
 		}
 		base, err := inputFingerprint(item.Definition, variant)

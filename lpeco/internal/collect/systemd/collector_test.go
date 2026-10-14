@@ -1,7 +1,10 @@
 package systemd
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,6 +38,28 @@ func TestPlanUsesSystemctlWhenAvailableAndReadOnlyFilesOtherwise(t *testing.T) {
 		if definition.SafetyClass != model.PassiveRead {
 			t.Fatalf("probe %s safety = %s", definition.ID, definition.SafetyClass)
 		}
+	}
+}
+
+func TestPlanTargetsUnitsOnlyInTheirDiscoveredManagerScope(t *testing.T) {
+	definitions := (Collector{}).Plan(model.HostProfile{SystemdRunning: true}, collect.Discovery{
+		Units: []collect.UnitIdentity{
+			{Name: "demo.service", Manager: "system", ManagerUID: 0},
+			{Name: "agent.service", Manager: "user", ManagerUID: 1000},
+		},
+	})
+	ids := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		ids = append(ids, definition.ID)
+	}
+	want := []string{
+		"systemd.show.system",
+		"systemd.show.user",
+		"systemd.cat.system.demo.service",
+		"systemd.cat.user.agent.service",
+	}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("scoped systemd plan = %#v, want %#v", ids, want)
 	}
 }
 
@@ -91,6 +116,8 @@ func TestReconcileFactsCombinesSeparateRuntimeAndFileObservations(t *testing.T) 
 	}
 	var demo UnitFact
 	var start ExecFact
+	var security UnitSecurityFact
+	var securityEnvelope model.Fact
 	for _, fact := range reconciled {
 		switch fact.Kind {
 		case "systemd_unit":
@@ -105,6 +132,13 @@ func TestReconcileFactsCombinesSeparateRuntimeAndFileObservations(t *testing.T) 
 			if value.UnitName == "demo.service" && value.Directive == "ExecStart" && value.Manager == "system" {
 				start = value
 			}
+		case "systemd_security":
+			var value UnitSecurityFact
+			_ = json.Unmarshal(fact.Data, &value)
+			if value.UnitName == "demo.service" && value.Manager == "system" {
+				security = value
+				securityEnvelope = fact
+			}
 		}
 	}
 	if !demo.RuntimeObserved || !demo.FilesObserved || demo.Confidence != model.ConfidenceHigh {
@@ -112,6 +146,9 @@ func TestReconcileFactsCombinesSeparateRuntimeAndFileObservations(t *testing.T) 
 	}
 	if start.Command.Executable != "/usr/bin/runtime-demo" || start.Source.EvidenceID != "evidence-cat" || start.Confidence != model.ConfidenceHigh {
 		t.Fatalf("reconciled ExecStart = %#v", start)
+	}
+	if security.Confidence != model.ConfidenceHigh || securityEnvelope.Confidence != model.ConfidenceHigh || len(securityEnvelope.MissingFacts) != 0 {
+		t.Fatalf("reconciled security = %#v, envelope = %#v", security, securityEnvelope)
 	}
 }
 
@@ -158,6 +195,149 @@ func TestSystemctlHeaderOnlyObservationRequestsFileFallback(t *testing.T) {
 	})
 	if fileAssessment.Fallback {
 		t.Fatalf("file variant recursively requested fallback: %#v", fileAssessment)
+	}
+}
+
+func TestCatProbeReadsAuthoritativePathsIntoLengthDelimitedFrames(t *testing.T) {
+	definition := CatDefinition("system", "demo.service")
+	for _, variant := range definition.Variants {
+		script := variant.Command.Script
+		for _, required := range []string{"LPECO_SYSTEMD_CAT_V2", "SOURCE\\t%s\\t%s", "wc -c", "od -An -v -tx1"} {
+			if !strings.Contains(script, required) {
+				t.Errorf("%s cat variant lacks %q", variant.ID, required)
+			}
+		}
+	}
+	systemctlScript := definition.Variants[0].Command.Script
+	for _, property := range []string{"--property=FragmentPath", "--property=DropInPaths"} {
+		if !strings.Contains(systemctlScript, property) {
+			t.Errorf("systemctl cat variant lacks authoritative %s lookup", property)
+		}
+	}
+	if strings.Contains(systemctlScript, "systemctl $_lpeco_scope cat") {
+		t.Fatal("systemctl cat output is ambiguous with legal unit comments")
+	}
+}
+
+func TestCatParserRejectsLegacyCommentDelimitedOutput(t *testing.T) {
+	documents, diagnostics := ParseCat("demo.service", []byte("# /etc/systemd/system/demo.service\n[Service]\nExecStart=/bin/true\n"), "evidence-legacy")
+	if len(documents) != 0 || !hasDiagnostic(diagnostics, "cat-unsupported-format") {
+		t.Fatalf("legacy ambiguous cat output = documents %#v, diagnostics %#v", documents, diagnostics)
+	}
+}
+
+func TestCatFactsAcceptCanonicalFragmentForAlias(t *testing.T) {
+	input := catFrameForTest("system", 0, catTestSource{
+		Path:    "/usr/lib/systemd/system/rsyslog.service",
+		Content: "[Service]\nExecStart=/usr/sbin/rsyslogd -n\n",
+	})
+	_, diagnostics := ParseCat("syslog.service", input, "evidence-alias")
+	if len(diagnostics) != 0 {
+		t.Fatalf("authoritative canonical alias source produced diagnostics: %#v", diagnostics)
+	}
+	facts, err := (Collector{}).Parse(CatDefinition("system", "syslog.service"), adapter.ExecResult{
+		Stdout: input, Status: model.ProbeComplete,
+	}, "evidence-alias")
+	if err != nil {
+		t.Fatalf("parse alias unit: %v", err)
+	}
+	for _, fact := range facts {
+		if fact.Kind != "systemd_exec" {
+			continue
+		}
+		var value ExecFact
+		if json.Unmarshal(fact.Data, &value) == nil && value.UnitName == "syslog.service" && value.Command.Executable == "/usr/sbin/rsyslogd" {
+			return
+		}
+	}
+	t.Fatalf("canonical alias fragment did not produce an exec fact: %#v", facts)
+}
+
+func TestCatFramePreservesSourceLookingCommentsAsUnitContent(t *testing.T) {
+	input := catFrameForTest("system", 0, catTestSource{
+		Path: "/usr/lib/systemd/system/demo.service",
+		Content: "[Service]\n" +
+			"# /etc/systemd/system/demo.service\n" +
+			"# /etc/systemd/system/demo.service.d/fake.conf\n" +
+			"ExecStart=/usr/lib/demo/worker\n",
+	})
+	documents, diagnostics := ParseCat("demo.service", input, "evidence-comment")
+	if len(diagnostics) != 0 {
+		t.Fatalf("source-looking unit comments produced diagnostics: %#v", diagnostics)
+	}
+	if len(documents) != 1 || documents[0].Source.Path != "/usr/lib/systemd/system/demo.service" {
+		t.Fatalf("source-looking comments changed document provenance: %#v", documents)
+	}
+	facts, err := (Collector{}).Parse(CatDefinition("system", "demo.service"), adapter.ExecResult{
+		Stdout: input, Status: model.ProbeComplete,
+	}, "evidence-comment")
+	if err != nil {
+		t.Fatalf("parse source-looking comments: %v", err)
+	}
+	for _, fact := range facts {
+		if fact.Kind != "systemd_exec" {
+			continue
+		}
+		var value ExecFact
+		if json.Unmarshal(fact.Data, &value) == nil && value.Command.Executable == "/usr/lib/demo/worker" {
+			return
+		}
+	}
+	t.Fatalf("directive following source-looking comments was lost: %#v", facts)
+}
+
+func TestIncompleteCatFrameDowngradesFileDerivedSemantics(t *testing.T) {
+	complete := catFrameForTest("system", 0, catTestSource{
+		Path:    "/usr/lib/systemd/system/demo.service",
+		Content: "[Service]\nExecStart=/usr/lib/demo/worker\n",
+	})
+	input := bytes.TrimSuffix(complete, []byte("END\n"))
+	facts, err := (Collector{}).Parse(CatDefinition("system", "demo.service"), adapter.ExecResult{
+		Stdout: input, Status: model.ProbeComplete,
+	}, "evidence-truncated-frame")
+	if err != nil {
+		t.Fatalf("parse incomplete framed observation: %v", err)
+	}
+	var foundExec, foundSource, foundSecurity, foundDiagnostic bool
+	for _, fact := range facts {
+		switch fact.Kind {
+		case "systemd_exec":
+			var value ExecFact
+			if json.Unmarshal(fact.Data, &value) == nil && value.Command.Executable == "/usr/lib/demo/worker" {
+				foundExec = true
+				if value.Confidence == model.ConfidenceHigh || !containsMissing(value.MissingFacts, "unit file observation incomplete") {
+					t.Fatalf("incomplete frame left exec semantics authoritative: %#v", value)
+				}
+				if fact.Confidence == model.ConfidenceHigh || !containsMissing(fact.MissingFacts, "unit file observation incomplete") {
+					t.Fatalf("incomplete frame was not reflected in fact envelope: %#v", fact)
+				}
+			}
+		case "systemd_unit_source":
+			var value UnitSourceFact
+			if json.Unmarshal(fact.Data, &value) == nil && value.Path == "/usr/lib/systemd/system/demo.service" {
+				foundSource = true
+				if value.Confidence == model.ConfidenceHigh {
+					t.Fatalf("incomplete frame left source confidence high: %#v", value)
+				}
+			}
+		case "systemd_security":
+			var value UnitSecurityFact
+			if json.Unmarshal(fact.Data, &value) == nil && value.UnitName == "demo.service" {
+				foundSecurity = true
+				if value.Confidence == model.ConfidenceHigh || fact.Confidence == model.ConfidenceHigh ||
+					!containsMissing(value.MissingFacts, "unit file observation incomplete") ||
+					!containsMissing(fact.MissingFacts, "unit file observation incomplete") {
+					t.Fatalf("incomplete frame left security semantics authoritative: value=%#v fact=%#v", value, fact)
+				}
+			}
+		case "systemd_diagnostic":
+			if strings.Contains(string(fact.Data), "cat-missing-end") {
+				foundDiagnostic = true
+			}
+		}
+	}
+	if !foundExec || !foundSource || !foundSecurity || !foundDiagnostic {
+		t.Fatalf("incomplete frame facts: exec=%v source=%v security=%v diagnostic=%v facts=%#v", foundExec, foundSource, foundSecurity, foundDiagnostic, facts)
 	}
 }
 
@@ -285,4 +465,23 @@ func containsMissing(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+type catTestSource struct {
+	Path    string
+	Content string
+}
+
+func catFrameForTest(manager string, managerUID int, sources ...catTestSource) []byte {
+	var output bytes.Buffer
+	if manager != "" {
+		fmt.Fprintf(&output, "LPECO_MANAGER\t%s\t%d\n", manager, managerUID)
+	}
+	output.WriteString("LPECO_SYSTEMD_CAT_V2\n")
+	for _, source := range sources {
+		fmt.Fprintf(&output, "SOURCE\t%s\t%d\n", hex.EncodeToString([]byte(source.Path)), len(source.Content))
+		output.WriteString(source.Content)
+	}
+	output.WriteString("END\n")
+	return output.Bytes()
 }

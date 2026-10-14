@@ -64,6 +64,7 @@ fail the gate.
 ## Real systemd VM gate
 
 ```sh
+make prepare-vm
 make test-vm
 ```
 
@@ -79,6 +80,14 @@ uses a temporary qcow2 overlay, refuses to run without
 skip. The host binary connects with verified SSH and keeps all evidence in the
 host-side temporary directory; no LPECO binary or evidence is copied into the
 guest.
+
+The fixture README provides a dated Ubuntu cloud-image URL and SHA-256 digest.
+The preparation target verifies that digest before creating artifacts, boots
+only an overlay with guest egress disabled, provisions the deliberately unsafe
+units, shuts it down cleanly, and emits a standalone qcow2 image plus a fresh
+SSH key. It also installs a fixture-only base-mode ACL observer so the pinned
+minimal image can exercise permission edges without network package installs;
+the fixture has no extended ACLs. It refuses to overwrite either output.
 
 Container and VM images contain deliberately writable privileged-consumer
 inputs. Never reuse them outside an isolated test network.

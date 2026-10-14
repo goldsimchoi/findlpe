@@ -132,6 +132,25 @@ func StringAttribute(value json.RawMessage, name string) string {
 	return entry
 }
 
+func StringSliceAttribute(value json.RawMessage, name string) []string {
+	entry, ok := Attributes(value)[name]
+	if !ok {
+		return nil
+	}
+	result := []string{}
+	switch values := entry.(type) {
+	case []string:
+		result = append(result, values...)
+	case []any:
+		for _, value := range values {
+			if text, ok := value.(string); ok && text != "" {
+				result = append(result, text)
+			}
+		}
+	}
+	return result
+}
+
 func IntAttribute(value json.RawMessage, name string) (int, bool) {
 	entry, ok := Attributes(value)[name].(float64)
 	if !ok {

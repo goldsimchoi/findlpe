@@ -1,61 +1,106 @@
 package systemd
 
 import (
-	"bufio"
 	"bytes"
+	"encoding/hex"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/normalone/lpeco/internal/systemdunit"
 )
+
+const catFrameHeader = "LPECO_SYSTEMD_CAT_V2\n"
 
 type DocumentSet struct {
 	Documents []systemdunit.Document
 	Complete  bool
 }
 
+// ParseCat decodes length-delimited unit sources emitted by the collector.
+// Source paths are hexadecimal and each content length is explicit, so a legal
+// unit comment can never be confused with provenance framing.
 func ParseCat(unitName string, input []byte, evidenceID string) ([]systemdunit.Document, []CollectorDiagnostic) {
-	scanner := bufio.NewScanner(bytes.NewReader(input))
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	payload := input
+	if bytes.HasPrefix(payload, []byte("LPECO_MANAGER\t")) {
+		newline := bytes.IndexByte(payload, '\n')
+		if newline < 0 {
+			return nil, []CollectorDiagnostic{catDiagnostic("cat-invalid-manager-frame", "manager frame is truncated", unitName, evidenceID)}
+		}
+		payload = payload[newline+1:]
+	}
+	if !bytes.HasPrefix(payload, []byte(catFrameHeader)) {
+		return nil, []CollectorDiagnostic{catDiagnostic("cat-unsupported-format", "length-delimited source frame is missing", unitName, evidenceID)}
+	}
+	payload = payload[len(catFrameHeader):]
+
 	var documents []systemdunit.Document
 	var diagnostics []CollectorDiagnostic
-	var path string
-	var content strings.Builder
-	flush := func() {
-		if path == "" {
-			return
+	seenPaths := make(map[string]bool)
+	ended := false
+	for len(payload) > 0 {
+		if bytes.HasPrefix(payload, []byte("END\n")) {
+			ended = true
+			payload = payload[len("END\n"):]
+			if len(bytes.TrimSpace(payload)) > 0 {
+				diagnostics = append(diagnostics, catDiagnostic("cat-trailing-data", "data follows the end of the source frame", unitName, evidenceID))
+			}
+			break
 		}
-		document, parseDiagnostics := systemdunit.Parse(systemdunit.Source{Path: path, EvidenceID: evidenceID, Content: []byte(content.String())})
+
+		newline := bytes.IndexByte(payload, '\n')
+		if newline < 0 {
+			diagnostics = append(diagnostics, catDiagnostic("cat-truncated-header", "source header is truncated", unitName, evidenceID))
+			break
+		}
+		header := string(payload[:newline])
+		payload = payload[newline+1:]
+		fields := strings.Split(header, "\t")
+		if len(fields) != 3 || fields[0] != "SOURCE" {
+			diagnostics = append(diagnostics, catDiagnostic("cat-invalid-source-header", "source header is malformed", unitName, evidenceID))
+			break
+		}
+		pathBytes, err := hex.DecodeString(fields[1])
+		if err != nil {
+			diagnostics = append(diagnostics, catDiagnostic("cat-invalid-source-path", "source path encoding is malformed", unitName, evidenceID))
+			break
+		}
+		contentLength, err := strconv.ParseUint(fields[2], 10, 63)
+		if err != nil {
+			diagnostics = append(diagnostics, catDiagnostic("cat-invalid-source-length", "source content length is malformed", unitName, evidenceID))
+			break
+		}
+		if contentLength > uint64(len(payload)) {
+			diagnostics = append(diagnostics, catDiagnostic("cat-truncated-source", "source content is truncated", unitName, evidenceID))
+			break
+		}
+		content := append([]byte(nil), payload[:int(contentLength)]...)
+		payload = payload[int(contentLength):]
+		path := string(pathBytes)
+		if !filepath.IsAbs(path) || strings.ContainsRune(path, '\x00') {
+			diagnostics = append(diagnostics, catDiagnostic("cat-invalid-source-path", "source path is not an absolute filesystem path", unitName, evidenceID))
+			continue
+		}
+		if seenPaths[path] {
+			diagnostics = append(diagnostics, catDiagnostic("cat-duplicate-source", path, unitName, evidenceID))
+			continue
+		}
+		seenPaths[path] = true
+		document, parseDiagnostics := systemdunit.Parse(systemdunit.Source{Path: path, EvidenceID: evidenceID, Content: content})
 		documents = append(documents, document)
 		for _, diagnostic := range parseDiagnostics {
-			diagnostics = append(diagnostics, CollectorDiagnostic{Code: "unit-" + diagnostic.Code, Message: diagnostic.Message, UnitName: unitName, EvidenceIDs: []string{evidenceID}})
-		}
-		content.Reset()
-	}
-	for scanner.Scan() {
-		line := strings.TrimSuffix(scanner.Text(), "\r")
-		if strings.HasPrefix(line, "# /") {
-			flush()
-			path = strings.TrimSpace(strings.TrimPrefix(line, "# "))
-			continue
-		}
-		if path != "" {
-			content.WriteString(line)
-			content.WriteByte('\n')
+			diagnostics = append(diagnostics, catDiagnostic("unit-"+diagnostic.Code, diagnostic.Message, unitName, evidenceID))
 		}
 	}
-	flush()
-	if scanner.Err() != nil {
-		diagnostics = append(diagnostics, CollectorDiagnostic{Code: "cat-read-error", Message: scanner.Err().Error(), UnitName: unitName, EvidenceIDs: []string{evidenceID}})
+	if !ended {
+		diagnostics = append(diagnostics, catDiagnostic("cat-missing-end", "source frame has no end marker", unitName, evidenceID))
 	}
 	if len(documents) == 0 {
-		diagnostics = append(diagnostics, CollectorDiagnostic{Code: "cat-no-sources", Message: "no source headers found", UnitName: unitName, EvidenceIDs: []string{evidenceID}})
-	}
-	for index := range documents {
-		if filepath.Base(documents[index].Source.Path) == unitName || strings.HasSuffix(filepath.Base(filepath.Dir(documents[index].Source.Path)), ".d") {
-			continue
-		}
-		diagnostics = append(diagnostics, CollectorDiagnostic{Code: "unexpected-unit-source", Message: documents[index].Source.Path, UnitName: unitName, EvidenceIDs: []string{evidenceID}})
+		diagnostics = append(diagnostics, catDiagnostic("cat-no-sources", "no framed unit sources found", unitName, evidenceID))
 	}
 	return documents, diagnostics
+}
+
+func catDiagnostic(code, message, unitName, evidenceID string) CollectorDiagnostic {
+	return CollectorDiagnostic{Code: code, Message: message, UnitName: unitName, EvidenceIDs: []string{evidenceID}}
 }

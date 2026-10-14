@@ -85,6 +85,7 @@ func ReconcileFacts(facts []model.Fact) ([]model.Fact, []CollectorDiagnostic) {
 			merged.FilesObserved = merged.FilesObserved || value.FilesObserved
 			merged.SourcePaths = appendUnique(merged.SourcePaths, value.SourcePaths...)
 			merged.EvidenceIDs = appendUnique(merged.EvidenceIDs, value.EvidenceIDs...)
+			merged.MissingFacts = appendUnique(merged.MissingFacts, value.MissingFacts...)
 			if runtime != nil && value.FilesObserved {
 				diagnostics = appendUnitMismatchDiagnostics(diagnostics, *runtime, value)
 			}
@@ -94,8 +95,14 @@ func ReconcileFacts(facts []model.Fact) ([]model.Fact, []CollectorDiagnostic) {
 		}
 		if merged.RuntimeObserved && merged.FilesObserved && len(merged.MissingFacts) == 0 {
 			merged.Confidence = model.ConfidenceHigh
+		} else if len(merged.MissingFacts) > 0 {
+			merged.Confidence = atMostMedium(merged.Confidence)
 		}
-		result = append(result, reconciledFact("systemd_unit", merged, group))
+		resolved := []string{}
+		if merged.RuntimeObserved {
+			resolved = append(resolved, "runtime properties unavailable")
+		}
+		result = append(result, reconciledFact("systemd_unit", merged, group, resolved...))
 	}
 
 	for _, key := range sortedKeys(execGroups) {
@@ -130,6 +137,7 @@ func ReconcileFacts(facts []model.Fact) ([]model.Fact, []CollectorDiagnostic) {
 			merged.RuntimeObserved = merged.RuntimeObserved || value.RuntimeObserved
 			merged.FileObserved = merged.FileObserved || value.FileObserved
 			merged.EvidenceIDs = appendUnique(merged.EvidenceIDs, value.EvidenceIDs...)
+			merged.MissingFacts = appendUnique(merged.MissingFacts, value.MissingFacts...)
 		}
 		if file != nil {
 			merged.Source = file.Source
@@ -148,8 +156,17 @@ func ReconcileFacts(facts []model.Fact) ([]model.Fact, []CollectorDiagnostic) {
 		}
 		if merged.RuntimeObserved && merged.FileObserved && merged.Command.Valid && len(merged.MissingFacts) == 0 {
 			merged.Confidence = model.ConfidenceHigh
+		} else if len(merged.MissingFacts) > 0 {
+			merged.Confidence = atMostMedium(merged.Confidence)
 		}
-		result = append(result, reconciledFact("systemd_exec", merged, group))
+		resolved := []string{}
+		if merged.RuntimeObserved {
+			resolved = append(resolved, "runtime command unavailable")
+		}
+		if merged.FileObserved {
+			resolved = append(resolved, "file provenance unavailable")
+		}
+		result = append(result, reconciledFact("systemd_exec", merged, group, resolved...))
 	}
 
 	for _, key := range sortedKeys(securityGroups) {
@@ -175,11 +192,21 @@ func ReconcileFacts(facts []model.Fact) ([]model.Fact, []CollectorDiagnostic) {
 			merged.RuntimeObserved = merged.RuntimeObserved || value.RuntimeObserved
 			merged.FilesObserved = merged.FilesObserved || value.FilesObserved
 			merged.EvidenceIDs = appendUnique(merged.EvidenceIDs, value.EvidenceIDs...)
+			merged.MissingFacts = appendUnique(merged.MissingFacts, value.MissingFacts...)
 		}
-		if merged.RuntimeObserved && merged.FilesObserved {
+		if merged.RuntimeObserved {
+			merged.MissingFacts = removeMissing(merged.MissingFacts, "runtime security properties unavailable")
+		}
+		if merged.RuntimeObserved && merged.FilesObserved && len(merged.MissingFacts) == 0 {
 			merged.Confidence = model.ConfidenceHigh
+		} else if len(merged.MissingFacts) > 0 {
+			merged.Confidence = atMostMedium(merged.Confidence)
 		}
-		result = append(result, reconciledFact("systemd_security", merged, group))
+		resolved := []string{}
+		if merged.RuntimeObserved {
+			resolved = append(resolved, "runtime security properties unavailable")
+		}
+		result = append(result, reconciledFact("systemd_security", merged, group, resolved...))
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -213,25 +240,60 @@ func appendUnitMismatchDiagnostics(result []CollectorDiagnostic, runtime, file U
 	return result
 }
 
-func reconciledFact(kind string, value any, inputs []model.Fact) model.Fact {
+func reconciledFact(kind string, value any, inputs []model.Fact, resolvedMissing ...string) model.Fact {
 	data, _ := json.Marshal(value)
+	var semantic struct {
+		Confidence   model.Confidence `json:"confidence"`
+		MissingFacts []string         `json:"missing_facts"`
+	}
+	_ = json.Unmarshal(data, &semantic)
 	evidence := []string{}
 	status := model.ProbeComplete
-	confidence := model.ConfidenceHigh
-	missing := []string{}
+	confidence := semantic.Confidence
+	if confidence == "" {
+		confidence = model.ConfidenceHigh
+	}
+	missing := appendUnique(nil, semantic.MissingFacts...)
 	for _, input := range inputs {
 		evidence = appendUnique(evidence, input.EvidenceIDs...)
-		missing = appendUnique(missing, input.MissingFacts...)
+		unresolved := unresolvedMissingFacts(input.MissingFacts, resolvedMissing)
+		missing = appendUnique(missing, unresolved...)
+		// A source whose only limitation was supplied by another observation no
+		// longer caps the reconciled result. Every other source confidence does.
+		if len(input.MissingFacts) == 0 || len(unresolved) > 0 {
+			confidence = weakerSystemdConfidence(confidence, input.Confidence)
+		}
 		if input.ObservationStatus != "" && input.ObservationStatus != model.ProbeComplete {
 			status = input.ObservationStatus
 			confidence = weakerSystemdConfidence(confidence, input.Confidence)
 		}
 	}
+	missing = compactNonEmpty(missing)
+	if len(missing) > 0 {
+		confidence = atMostMedium(confidence)
+	}
+	var attributes map[string]any
+	if json.Unmarshal(data, &attributes) == nil {
+		attributes["confidence"] = confidence
+		attributes["missing_facts"] = missing
+		data, _ = json.Marshal(attributes)
+	}
 	id, _ := model.StableID("fact", struct {
 		Kind string
 		Data json.RawMessage
 	}{kind, data})
-	return model.Fact{ID: id, Kind: kind, SourceCollector: "systemd", EvidenceIDs: compactNonEmpty(evidence), Confidence: confidence, ObservationStatus: status, MissingFacts: compactNonEmpty(missing), Data: data}
+	return model.Fact{ID: id, Kind: kind, SourceCollector: "systemd", EvidenceIDs: compactNonEmpty(evidence), Confidence: confidence, ObservationStatus: status, MissingFacts: missing, Data: data}
+}
+
+func unresolvedMissingFacts(values, resolved []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if containsString(resolved, value) {
+			continue
+		}
+		result = appendUnique(result, value)
+	}
+	return result
 }
 
 func scopeKey(manager string, managerUID int, unit string) string {

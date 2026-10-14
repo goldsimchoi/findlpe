@@ -63,6 +63,7 @@ func discover(facts []model.Fact) collect.Discovery {
 	pidSet := make(map[int]bool)
 	processSet := make(map[string]collect.ProcessIdentity)
 	unitSet := make(map[string]bool)
+	unitIdentitySet := make(map[string]collect.UnitIdentity)
 	pathSet := make(map[string]bool)
 	var mounts []collect.Mount
 	for _, fact := range facts {
@@ -93,9 +94,24 @@ func discover(facts []model.Fact) collect.Discovery {
 		}
 	}
 	for _, node := range g.NodesByKind(model.NodeUnit) {
-		if node.Label != "" {
-			unitSet[node.Label] = true
+		if node.Label == "" || graphpkg.BoolAttribute(node.Attributes, "inventory_missing", false) || graphpkg.StringAttribute(node.Attributes, "load_state") == "not-found" {
+			continue
 		}
+		unitSet[node.Label] = true
+		manager := graphpkg.StringAttribute(node.Attributes, "manager")
+		if manager == "" {
+			manager = "system"
+		}
+		managerUID, ok := graphpkg.IntAttribute(node.Attributes, "manager_uid")
+		if !ok {
+			if manager == "system" {
+				managerUID = 0
+			} else {
+				managerUID = -1
+			}
+		}
+		identity := collect.UnitIdentity{Name: node.Label, Manager: manager, ManagerUID: managerUID}
+		unitIdentitySet[fmt.Sprintf("%s:%d:%s", manager, managerUID, node.Label)] = identity
 	}
 	for _, kind := range []model.NodeKind{model.NodeFile, model.NodeDirectory, model.NodeExecutable, model.NodeScript, model.NodeLibrary, model.NodeSocket} {
 		for _, node := range g.NodesByKind(kind) {
@@ -118,6 +134,9 @@ func discover(facts []model.Fact) collect.Discovery {
 	for unit := range unitSet {
 		result.UnitNames = append(result.UnitNames, unit)
 	}
+	for _, unit := range unitIdentitySet {
+		result.Units = append(result.Units, unit)
+	}
 	for path := range pathSet {
 		result.ReferencedPaths = append(result.ReferencedPaths, path)
 	}
@@ -130,6 +149,15 @@ func discover(facts []model.Fact) collect.Discovery {
 		return result.HighValueProcesses[i].StartTime < result.HighValueProcesses[j].StartTime
 	})
 	sort.Strings(result.UnitNames)
+	sort.Slice(result.Units, func(i, j int) bool {
+		if result.Units[i].Manager != result.Units[j].Manager {
+			return result.Units[i].Manager < result.Units[j].Manager
+		}
+		if result.Units[i].ManagerUID != result.Units[j].ManagerUID {
+			return result.Units[i].ManagerUID < result.Units[j].ManagerUID
+		}
+		return result.Units[i].Name < result.Units[j].Name
+	})
 	sort.Strings(result.ReferencedPaths)
 	sort.Slice(result.Mounts, func(i, j int) bool {
 		if result.Mounts[i].MountPoint != result.Mounts[j].MountPoint {

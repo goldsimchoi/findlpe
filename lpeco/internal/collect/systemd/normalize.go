@@ -98,6 +98,7 @@ type UnitSecurityFact struct {
 	AmbientCapabilities   []string         `json:"ambient_capabilities"`
 	RuntimeObserved       bool             `json:"runtime_observed"`
 	FilesObserved         bool             `json:"files_observed"`
+	MissingFacts          []string         `json:"missing_facts"`
 	EvidenceIDs           []string         `json:"evidence_ids"`
 	Confidence            model.Confidence `json:"confidence"`
 }
@@ -137,9 +138,23 @@ func Normalize(runtimeUnits []RuntimeUnit, documentSets map[string][]DocumentSet
 			documents = append(documents, set.Documents...)
 			completeFiles = completeFiles || set.Complete
 		}
-		context := systemdunit.LoadContext{UnitName: name, Aliases: aliasesWithoutName(runtime.Names, name)}
+		aliases := aliasesWithoutName(runtime.Names, name)
+		if len(aliases) == 0 {
+			aliases = inferredFragmentAliases(name, documents)
+		}
+		context := systemdunit.LoadContext{UnitName: name, Aliases: aliases}
 		effective := systemdunit.Merge(context, documents)
 		unit := makeUnitFact(name, runtime, hasRuntime, effective, currentUID)
+		for _, document := range documents {
+			if containsString(effective.Sources, document.Source.Path) {
+				unit.EvidenceIDs = appendUnique(unit.EvidenceIDs, document.Source.EvidenceID)
+			}
+		}
+		filesIncomplete := len(documents) > 0 && !completeFiles
+		if filesIncomplete {
+			unit.MissingFacts = appendUnique(unit.MissingFacts, "unit file observation incomplete")
+			unit.Confidence = atMostMedium(unit.Confidence)
+		}
 		if hasObservation && runtime.FileInventory {
 			unit.Manager = runtime.Manager
 			unit.ManagerUID = runtime.ManagerUID
@@ -173,9 +188,24 @@ func Normalize(runtimeUnits []RuntimeUnit, documentSets map[string][]DocumentSet
 			})
 		}
 		execs, diagnostics := normalizeExecs(name, unit.Manager, unit.ManagerUID, runtime, hasRuntime, effective, unit.EvidenceIDs)
+		if filesIncomplete {
+			for index := range execs {
+				if !execs[index].FileObserved {
+					continue
+				}
+				execs[index].MissingFacts = appendUnique(execs[index].MissingFacts, "unit file observation incomplete")
+				execs[index].Confidence = atMostMedium(execs[index].Confidence)
+			}
+		}
 		result.Execs = append(result.Execs, execs...)
 		result.Diagnostics = append(result.Diagnostics, diagnostics...)
-		result.Security = append(result.Security, normalizeSecurity(name, unit.Manager, unit.ManagerUID, runtime, hasRuntime, effective, unit.EvidenceIDs))
+		security := normalizeSecurity(name, unit.Manager, unit.ManagerUID, runtime, hasRuntime, effective, unit.EvidenceIDs)
+		if filesIncomplete {
+			security.FilesObserved = false
+			security.MissingFacts = appendUnique(security.MissingFacts, "unit file observation incomplete")
+			security.Confidence = atMostMedium(security.Confidence)
+		}
+		result.Security = append(result.Security, security)
 	}
 	for _, runtime := range runtimeUnits {
 		if activation, ok := normalizeActivation(runtime); ok {
@@ -189,6 +219,13 @@ func Normalize(runtimeUnits []RuntimeUnit, documentSets map[string][]DocumentSet
 		return result.Sources[i].Path < result.Sources[j].Path
 	})
 	return result
+}
+
+func atMostMedium(confidence model.Confidence) model.Confidence {
+	if confidence == "" || confidence == model.ConfidenceHigh {
+		return model.ConfidenceMedium
+	}
+	return confidence
 }
 
 func makeUnitFact(name string, runtime RuntimeUnit, hasRuntime bool, effective systemdunit.EffectiveUnit, currentUID int) UnitFact {
@@ -321,12 +358,14 @@ func normalizeSecurity(name, manager string, managerUID int, runtime RuntimeUnit
 		security.NoNewPrivileges = runtime.NoNewPrivileges
 		security.CapabilityBoundingSet = append([]string(nil), runtime.CapabilityBoundingSet...)
 		security.AmbientCapabilities = append([]string(nil), runtime.AmbientCapabilities...)
+		security.MissingFacts = appendUnique(security.MissingFacts, runtime.MissingFacts...)
 		if len(runtime.MissingFacts) > 0 {
 			security.Confidence = model.ConfidenceMedium
 		}
 		return security
 	}
 	security.Confidence = model.ConfidenceMedium
+	security.MissingFacts = append(security.MissingFacts, "runtime security properties unavailable")
 	if value := effective.Scalar("Service", "DynamicUser"); value != nil {
 		security.DynamicUser = parseSystemdBool(value.Value)
 	}
@@ -376,8 +415,9 @@ func Facts(normalized Normalized) ([]model.Fact, error) {
 		}
 		for index, entry := range entries {
 			var envelope struct {
-				EvidenceIDs []string         `json:"evidence_ids"`
-				Confidence  model.Confidence `json:"confidence"`
+				EvidenceIDs  []string         `json:"evidence_ids"`
+				Confidence   model.Confidence `json:"confidence"`
+				MissingFacts []string         `json:"missing_facts"`
 			}
 			if err := json.Unmarshal(entry, &envelope); err != nil {
 				return err
@@ -392,7 +432,10 @@ func Facts(normalized Normalized) ([]model.Fact, error) {
 			if err != nil {
 				return err
 			}
-			facts = append(facts, model.Fact{ID: id, Kind: kind, SourceCollector: "systemd", EvidenceIDs: envelope.EvidenceIDs, Confidence: envelope.Confidence, Data: entry})
+			facts = append(facts, model.Fact{
+				ID: id, Kind: kind, SourceCollector: "systemd", EvidenceIDs: envelope.EvidenceIDs,
+				Confidence: envelope.Confidence, MissingFacts: compactNonEmpty(envelope.MissingFacts), Data: entry,
+			})
 		}
 		return nil
 	}
@@ -438,6 +481,25 @@ func aliasesWithoutName(values []string, name string) []string {
 func evidenceFromDocument(document systemdunit.Document) []string {
 	if document.Source.EvidenceID != "" {
 		return []string{document.Source.EvidenceID}
+	}
+	return nil
+}
+
+func inferredFragmentAliases(unitName string, documents []systemdunit.Document) []string {
+	aliases := []string{}
+	for _, document := range documents {
+		path := document.Source.Path
+		if strings.HasSuffix(filepath.Base(filepath.Dir(path)), ".d") {
+			continue
+		}
+		base := filepath.Base(path)
+		if base == unitName || filepath.Ext(base) != filepath.Ext(unitName) {
+			continue
+		}
+		aliases = appendUnique(aliases, base)
+	}
+	if len(aliases) == 1 {
+		return aliases
 	}
 	return nil
 }

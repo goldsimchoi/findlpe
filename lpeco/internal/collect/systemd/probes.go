@@ -51,11 +51,32 @@ for _lpeco_root do
   done
 done`
 
+const catFrameFunctions = `_lpeco_hex() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
+_lpeco_emit_source() {
+  _lpeco_source=$1
+  case "$_lpeco_source" in /*) ;; *) printf 'invalid unit source path\n' >&2; return 1 ;; esac
+  [ -f "$_lpeco_source" ] && [ -r "$_lpeco_source" ] || { printf 'unreadable unit source: %s\n' "$_lpeco_source" >&2; return 1; }
+  _lpeco_size=$(LC_ALL=C wc -c <"$_lpeco_source" 2>/dev/null) || return 1
+  _lpeco_size=$(printf '%s' "$_lpeco_size" | tr -d '[:space:]')
+  case "$_lpeco_size" in ''|*[!0-9]*) printf 'invalid unit source size\n' >&2; return 1 ;; esac
+  printf 'SOURCE\t%s\t%s\n' "$(_lpeco_hex "$_lpeco_source")" "$_lpeco_size"
+  LC_ALL=C cat -- "$_lpeco_source"
+}
+`
+
 const catScript = `_lpeco_manager=$1
 case "$1" in system) _lpeco_scope=; _lpeco_manager_uid=0 ;; user) _lpeco_scope=--user; _lpeco_manager_uid=$(id -u 2>/dev/null) ;; *) exit 64 ;; esac
-case "$2" in ''|-*) exit 64 ;; esac
-printf 'LPECO_MANAGER\t%s\t%s\n' "$_lpeco_manager" "$_lpeco_manager_uid"
-LC_ALL=C systemctl $_lpeco_scope cat --no-pager -- "$2"`
+case "$2" in ''|-*|*/*) exit 64 ;; esac
+` + catFrameFunctions + `printf 'LPECO_MANAGER\t%s\t%s\nLPECO_SYSTEMD_CAT_V2\n' "$_lpeco_manager" "$_lpeco_manager_uid"
+_lpeco_fragment=$(LC_ALL=C systemctl $_lpeco_scope show --no-pager --property=FragmentPath --value -- "$2" 2>/dev/null) || exit 1
+_lpeco_dropins=$(LC_ALL=C systemctl $_lpeco_scope show --no-pager --property=DropInPaths --value -- "$2" 2>/dev/null) || exit 1
+[ -n "$_lpeco_fragment" ] || { printf 'unit fragment path is unavailable\n' >&2; exit 1; }
+_lpeco_emit_source "$_lpeco_fragment" || exit 1
+set -f
+for _lpeco_dropin in $_lpeco_dropins; do
+  _lpeco_emit_source "$_lpeco_dropin" || exit 1
+done
+printf 'END\n'`
 
 const unitFileCatScript = `_lpeco_manager=$1
 case "$1" in
@@ -63,19 +84,26 @@ case "$1" in
   user) _lpeco_manager_uid=$(id -u 2>/dev/null); set -- "$2" /usr/share/systemd/user /usr/local/share/systemd/user "$HOME/.local/share/systemd/user" "${XDG_RUNTIME_DIR:-/run/user/$(id -u 2>/dev/null)}/systemd/user" "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user" ;;
   *) exit 64 ;;
 esac
-printf 'LPECO_MANAGER\t%s\t%s\n' "$_lpeco_manager" "$_lpeco_manager_uid"
 _lpeco_unit=$1
 shift
 case "$_lpeco_unit" in ''|-*|*/*) exit 64 ;; esac
+` + catFrameFunctions + `printf 'LPECO_MANAGER\t%s\t%s\nLPECO_SYSTEMD_CAT_V2\n' "$_lpeco_manager" "$_lpeco_manager_uid"
+_lpeco_found=false
+_lpeco_failed=false
 for _lpeco_root do
   _lpeco_path="$_lpeco_root/$_lpeco_unit"
-  if [ -f "$_lpeco_path" ]; then printf '# %s\n' "$_lpeco_path"; sed -n '1,$p' "$_lpeco_path" 2>/dev/null; fi
+  if [ -f "$_lpeco_path" ]; then
+    _lpeco_found=true
+    _lpeco_emit_source "$_lpeco_path" || _lpeco_failed=true
+  fi
   for _lpeco_dropin in "$_lpeco_root/$_lpeco_unit.d"/*.conf; do
     [ -f "$_lpeco_dropin" ] || continue
-    printf '# %s\n' "$_lpeco_dropin"
-    sed -n '1,$p' "$_lpeco_dropin" 2>/dev/null
+    _lpeco_found=true
+    _lpeco_emit_source "$_lpeco_dropin" || _lpeco_failed=true
   done
-done`
+done
+[ "$_lpeco_found" = true ] && [ "$_lpeco_failed" = false ] || exit 1
+printf 'END\n'`
 
 func ShowDefinition(manager string) probe.Definition {
 	return probe.Definition{
@@ -128,7 +156,13 @@ func (Collector) Assess(definition probe.Definition, variant probe.Variant, resu
 	case "systemd-show-v1":
 		failed = failed || !bytes.Contains(result.Stdout, []byte("\nUNIT\t")) || bytes.Contains(result.Stdout, []byte("CollectionError="))
 	case "systemd-cat-v1":
-		failed = failed || !bytes.Contains(result.Stdout, []byte("\n# /"))
+		_, unit, err := catDefinitionParts(definition.ID)
+		if err != nil {
+			failed = true
+			break
+		}
+		documents, diagnostics := ParseCat(unit, result.Stdout, "assessment")
+		failed = failed || len(documents) == 0 || len(diagnostics) > 0
 	}
 	if failed {
 		assessment.Fallback = true
@@ -146,6 +180,31 @@ func (Collector) Plan(profile model.HostProfile, discovery collect.Discovery) []
 		return nil
 	}
 	definitions := []probe.Definition{ShowDefinition("system"), ShowDefinition("user")}
+	if len(discovery.Units) > 0 {
+		units := append([]collect.UnitIdentity(nil), discovery.Units...)
+		sort.Slice(units, func(i, j int) bool {
+			if units[i].Manager != units[j].Manager {
+				return units[i].Manager < units[j].Manager
+			}
+			if units[i].ManagerUID != units[j].ManagerUID {
+				return units[i].ManagerUID < units[j].ManagerUID
+			}
+			return units[i].Name < units[j].Name
+		})
+		seen := make(map[string]bool)
+		for _, unit := range units {
+			if unit.Name == "" || unit.Manager != "system" && unit.Manager != "user" {
+				continue
+			}
+			key := unit.Manager + "\x00" + unit.Name
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			definitions = append(definitions, CatDefinition(unit.Manager, unit.Name))
+		}
+		return definitions
+	}
 	unitNames := append([]string(nil), discovery.UnitNames...)
 	sort.Strings(unitNames)
 	for _, unit := range compactNonEmpty(unitNames) {
@@ -181,7 +240,8 @@ func (Collector) Parse(definition probe.Definition, result adapter.ExecResult, e
 			return []model.Fact{collectionStatusFact(definition, result, evidenceID, diagnostics)}, nil
 		}
 		managerUID := managerUIDFromCat(result.Stdout, manager)
-		normalized := Normalize(nil, map[string][]DocumentSet{unit: {{Documents: documents, Complete: result.Status == model.ProbeComplete}}}, managerUID)
+		complete := result.Status == model.ProbeComplete && len(diagnostics) == 0
+		normalized := Normalize(nil, map[string][]DocumentSet{unit: {{Documents: documents, Complete: complete}}}, managerUID)
 		applyScope(&normalized, manager, managerUID)
 		normalized.Diagnostics = append(normalized.Diagnostics, diagnostics...)
 		return Facts(normalized)

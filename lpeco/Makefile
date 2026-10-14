@@ -4,7 +4,7 @@ GOFMT ?= gofmt
 GOVULNCHECK_VERSION ?= v1.9.0
 ACTIONLINT_VERSION ?= v1.7.12
 
-.PHONY: fmt fmt-check vet test test-race test-integration test-vm test-benchmark build \
+.PHONY: fmt fmt-check vet test test-race test-integration prepare-vm test-vm test-benchmark build \
 	test-policy test-governance vulncheck lint-actions verify verify-ci
 
 fmt:
@@ -30,6 +30,9 @@ test-race:
 
 test-integration:
 	$(GO) test -tags=integration ./test/integration -count=1 -v
+
+prepare-vm:
+	test/integration/vm/prepare.sh
 
 test-vm:
 	$(GO) test -tags=vm_integration ./test/integration -run TestDisposableVMFixture -count=1 -v

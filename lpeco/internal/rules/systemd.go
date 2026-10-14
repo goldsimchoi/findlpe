@@ -94,9 +94,9 @@ func evaluateSystemdObjectRule(ctx context.Context, g *graphpkg.Graph, metadata 
 					continue
 				}
 				trigger, triggerEdge, triggerConfirmed := confirmedTrigger(g, consumer)
-				missing := []string{}
+				missing := mergeStrings(nil, graphpkg.StringSliceAttribute(unit.Attributes, "missing_facts"))
 				if !triggerConfirmed {
-					missing = append(missing, "activation trigger not confirmed")
+					missing = mergeStrings(missing, []string{"activation trigger not confirmed"})
 				}
 				confidences := []model.Confidence{unit.Confidence, runsAs.Confidence, dependency.Confidence, control.Confidence}
 				if triggerConfirmed {

@@ -11,6 +11,7 @@ import (
 	"github.com/normalone/lpeco/internal/collect"
 	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	"github.com/normalone/lpeco/internal/model"
+	"github.com/normalone/lpeco/internal/probe"
 )
 
 func TestParseReadableSudoersAndNonInteractiveList(t *testing.T) {
@@ -226,6 +227,23 @@ func TestCollectorLeavesPackageOwnershipToPackageInfoCollector(t *testing.T) {
 	}
 }
 
+func TestCollectorSkipsCommandSpecificProbesWhenHostLacksTools(t *testing.T) {
+	profile := model.HostProfile{AvailableCommands: map[string]bool{
+		"find": true, "sudo": false, "readelf": false, "objdump": false,
+	}}
+	definitions := (Collector{WalkOptions: WalkOptions{Limit: 17}}).Plan(profile, collect.Discovery{
+		ReferencedPaths: []string{"/usr/bin/demo"},
+	})
+	for _, definition := range definitions {
+		if definition.ID == "binary.sudo-list" || definition.Parser == "elf-text" {
+			t.Fatalf("planned probe requiring an unavailable optional command: %s", definition.ID)
+		}
+	}
+	if !hasDefinitionParser(definitions, "privileged-v1") {
+		t.Fatal("available find command should keep privileged inventory enabled")
+	}
+}
+
 func TestPrivilegedWalkKeepsCapabilitySearchOnFilesystemBoundary(t *testing.T) {
 	script := PrivilegedDefinition("/", 10).Variants[0].Command.Script
 	if strings.Contains(script, "getcap -r") {
@@ -243,4 +261,13 @@ func readBinaryFixture(t *testing.T, path string) []byte {
 		t.Fatalf("read fixture: %v", err)
 	}
 	return value
+}
+
+func hasDefinitionParser(definitions []probe.Definition, parser string) bool {
+	for _, definition := range definitions {
+		if definition.Parser == parser {
+			return true
+		}
+	}
+	return false
 }

@@ -1,4 +1,5 @@
-# /usr/lib/systemd/system/demo.service
+LPECO_SYSTEMD_CAT_V2
+SOURCE	2f7573722f6c69622f73797374656d642f73797374656d2f64656d6f2e73657276696365	223
 [Unit]
 Description=Demo service
 [Service]
@@ -8,8 +9,9 @@ ExecStart=/opt/demo/bin/run --from-file
 ExecReload=/bin/kill -HUP $MAINPID
 EnvironmentFile=/etc/default/demo
 WorkingDirectory=/srv/demo
-# /etc/systemd/system/demo.service.d/20-local.conf
+SOURCE	2f6574632f73797374656d642f73797374656d2f64656d6f2e736572766963652e642f32302d6c6f63616c2e636f6e66	73
 [Service]
 User=root
 ExecStart=
 ExecStart=/opt/demo/bin/run --from-dropin
+END

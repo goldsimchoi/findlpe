@@ -37,7 +37,7 @@ if [[ ! $LPECO_VM_SSH_USER =~ ^[A-Za-z0-9_.-]+$ ]] || [[ $LPECO_VM_SSH_USER == -
   printf 'VM setup error: LPECO_VM_SSH_USER contains unsafe characters\n' >&2
   exit 64
 fi
-for command_name in qemu-system-x86_64 qemu-img ssh; do
+for command_name in qemu-system-x86_64 qemu-img ssh ssh-keyscan; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'VM setup error: command not found: %s\n' "$command_name" >&2
     exit 69
@@ -72,6 +72,18 @@ memory=${LPECO_VM_MEMORY_MB:-1024}
 cpus=${LPECO_VM_CPUS:-1}
 accel=${LPECO_VM_ACCEL:-tcg}
 boot_timeout=${LPECO_VM_BOOT_TIMEOUT:-180}
+if [[ ! $memory =~ ^[0-9]+$ ]] || (( memory < 512 )); then
+  printf 'VM setup error: LPECO_VM_MEMORY_MB must be an integer of at least 512\n' >&2
+  exit 64
+fi
+if [[ ! $cpus =~ ^[0-9]+$ ]] || (( cpus < 1 )); then
+  printf 'VM setup error: LPECO_VM_CPUS must be a positive integer\n' >&2
+  exit 64
+fi
+if [[ ! $boot_timeout =~ ^[0-9]+$ ]] || (( boot_timeout < 30 )); then
+  printf 'VM setup error: LPECO_VM_BOOT_TIMEOUT must be an integer of at least 30 seconds\n' >&2
+  exit 64
+fi
 
 qemu-img create -q -f qcow2 -F "$image_format" -b "$LPECO_VM_IMAGE" "$overlay"
 qemu-system-x86_64 \
@@ -110,6 +122,30 @@ until ssh "${ssh_options[@]}" "$destination" true >/dev/null 2>&1; do
   sleep 2
 done
 
+advertised_host_keys=$temporary_directory/advertised-host-keys
+if ! ssh-keyscan -T 5 -p "$LPECO_VM_SSH_PORT" 127.0.0.1 >"$advertised_host_keys" 2>/dev/null || [[ ! -s $advertised_host_keys ]]; then
+  printf 'VM setup error: could not collect the fixture SSH host keys\n' >&2
+  exit 1
+fi
+if ! awk 'NF >= 3 && ($2 ~ /^ssh-/ || $2 ~ /^ecdsa-/) { found=1 } END { exit !found }' "$advertised_host_keys"; then
+  printf 'VM setup error: fixture advertised no supported SSH host key\n' >&2
+  exit 1
+fi
+sort -u "$advertised_host_keys" >"$known_hosts"
+chmod 0600 "$known_hosts"
+strict_ssh_options=(
+  -i "$LPECO_VM_SSH_KEY"
+  -p "$LPECO_VM_SSH_PORT"
+  -o BatchMode=yes
+  -o ConnectTimeout=3
+  -o StrictHostKeyChecking=yes
+  -o "UserKnownHostsFile=$known_hosts"
+)
+if ! ssh "${strict_ssh_options[@]}" "$destination" true >/dev/null 2>&1; then
+  printf 'VM setup error: strict SSH host-key verification failed after key discovery\n' >&2
+  exit 1
+fi
+
 fixture_root=${LPECO_VM_FIXTURE_ROOT:-/opt/lpeco-vm-fixture}
 if [[ ! $fixture_root =~ ^/[A-Za-z0-9_./-]+$ ]] || [[ /$fixture_root/ == */../* ]]; then
   printf 'VM setup error: LPECO_VM_FIXTURE_ROOT must be a normalized absolute path\n' >&2
@@ -124,9 +160,9 @@ terminal_report=$temporary_directory/terminal.txt
 scan_stderr=$temporary_directory/scan.stderr
 json_report=$temporary_directory/report.json
 
-ssh "${ssh_options[@]}" "$destination" sh -s -- check "$fixture_root" <"$script_directory/assert.sh"
-ssh "${ssh_options[@]}" "$destination" sh -s -- snapshot "$fixture_root" <"$script_directory/assert.sh" >"$before_snapshot"
-ssh "${ssh_options[@]}" "$destination" sh -s -- state "$fixture_root" <"$script_directory/assert.sh" >"$before_state"
+ssh "${strict_ssh_options[@]}" "$destination" sh -s -- check "$fixture_root" <"$script_directory/assert.sh"
+ssh "${strict_ssh_options[@]}" "$destination" sh -s -- snapshot "$fixture_root" <"$script_directory/assert.sh" >"$before_snapshot"
+ssh "${strict_ssh_options[@]}" "$destination" sh -s -- state "$fixture_root" <"$script_directory/assert.sh" >"$before_state"
 
 scan_status=0
 SSH_AUTH_SOCK= "$LPECO_BINARY" scan ssh "127.0.0.1:${LPECO_VM_SSH_PORT}" \
@@ -140,27 +176,44 @@ if [[ $scan_status -ne 3 ]]; then
 fi
 grep -q 'scan interrupted' "$scan_stderr"
 
-mapfile -t incomplete_probes < <(awk -F'"' '
-  /"probe_id":/ { probe=$4 }
-  /"status":/ && probe != "" && $4 != "complete" { print probe; probe="" }
-' "$state_directory/vm-fixture/session.json" | sort -u)
+checkpoint_resolution=$temporary_directory/checkpoint-resolution
+awk -f "$script_directory/checkpoint-resolution.awk" "$state_directory/vm-fixture/session.json" | sort >"$checkpoint_resolution"
+mapfile -t incomplete_probes < <(awk -F'\t' '$1 == "unresolved" { print $2 }' "$checkpoint_resolution")
+print_scan_diagnostics() {
+  printf 'scan stderr follows:\n' >&2
+  sed -n '1,200p' "$scan_stderr" >&2
+  unresolved_count=$(awk -F'\t' '$1 == "unresolved" { count++ } END { print count+0 }' "$checkpoint_resolution")
+  recovered_count=$(awk -F'\t' '$1 == "recovered" { count++ } END { print count+0 }' "$checkpoint_resolution")
+  printf 'checkpoint resolution: unresolved=%s recovered-by-fallback-or-retry=%s\n' "$unresolved_count" "$recovered_count" >&2
+  printf 'unresolved probe IDs (first 200):\n' >&2
+  awk -F'\t' '$1 == "unresolved" { print $2 }' "$checkpoint_resolution" | sed -n '1,200p' >&2
+  printf 'unresolved probe families:\n' >&2
+  awk -F'\t' '$1 == "unresolved" { split($2, part, "."); print part[1] "." part[2] }' "$checkpoint_resolution" | sort | uniq -c >&2
+}
 found_protected_environment=false
 for probe_id in "${incomplete_probes[@]}"; do
   case "$probe_id" in
     process.environment.*) found_protected_environment=true ;;
     systemd.show.user|systemd.cat.user.*) ;;
-    *) printf 'unexpected incomplete VM probe: %s\n' "$probe_id" >&2; exit 1 ;;
+    *)
+      printf 'unexpected incomplete VM probe: %s\n' "$probe_id" >&2
+      print_scan_diagnostics
+      exit 1
+      ;;
   esac
 done
 if [[ $found_protected_environment != true ]]; then
   printf 'VM scan did not preserve the expected protected process observation\n' >&2
+  printf 'incomplete probes observed:\n' >&2
+  printf '  %s\n' "${incomplete_probes[@]:-<none>}" >&2
+  print_scan_diagnostics
   exit 1
 fi
 "$LPECO_BINARY" report vm-fixture --format json --state-dir "$state_directory" >"$json_report"
 
-ssh "${ssh_options[@]}" "$destination" sh -s -- check "$fixture_root" <"$script_directory/assert.sh"
-ssh "${ssh_options[@]}" "$destination" sh -s -- snapshot "$fixture_root" <"$script_directory/assert.sh" >"$after_snapshot"
-ssh "${ssh_options[@]}" "$destination" sh -s -- state "$fixture_root" <"$script_directory/assert.sh" >"$after_state"
+ssh "${strict_ssh_options[@]}" "$destination" sh -s -- check "$fixture_root" <"$script_directory/assert.sh"
+ssh "${strict_ssh_options[@]}" "$destination" sh -s -- snapshot "$fixture_root" <"$script_directory/assert.sh" >"$after_snapshot"
+ssh "${strict_ssh_options[@]}" "$destination" sh -s -- state "$fixture_root" <"$script_directory/assert.sh" >"$after_state"
 diff -u "$before_snapshot" "$after_snapshot"
 diff -u "$before_state" "$after_state"
 grep -q '"rule_id": "systemd.writable-unit-source"' "$json_report"

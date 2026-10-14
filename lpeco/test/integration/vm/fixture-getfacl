@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+[ "$#" -eq 1 ] || { printf 'usage: getfacl [options] -- path\n' >&2; exit 64; }
+
+mode=$(stat -Lc '%a' -- "$1") || exit $?
+mode=$(printf '%03d' "$mode")
+while [ "${#mode}" -gt 3 ]; do mode=${mode#?}; done
+
+permissions() {
+  case "$1" in
+    0) printf '%s' '---' ;;
+    1) printf '%s' '--x' ;;
+    2) printf '%s' '-w-' ;;
+    3) printf '%s' '-wx' ;;
+    4) printf '%s' 'r--' ;;
+    5) printf '%s' 'r-x' ;;
+    6) printf '%s' 'rw-' ;;
+    7) printf '%s' 'rwx' ;;
+    *) exit 65 ;;
+  esac
+}
+
+owner=${mode%??}
+remainder=${mode#?}
+group=${remainder%?}
+other=${remainder#?}
+printf 'user::%s\ngroup::%s\nother::%s\n' \
+  "$(permissions "$owner")" "$(permissions "$group")" "$(permissions "$other")"

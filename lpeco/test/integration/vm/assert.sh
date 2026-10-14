@@ -6,16 +6,36 @@ fixture_root=${2:-/opt/lpeco-vm-fixture}
 
 check_systemd() {
   [ "$(cat /proc/1/comm)" = systemd ] || { printf 'PID 1 is not systemd\n' >&2; exit 1; }
+  command -v getfacl >/dev/null 2>&1 || { printf 'fixture getfacl observer is unavailable\n' >&2; exit 1; }
   for unit in lpeco-fixture.service lpeco-fixture.timer lpeco-fixture.socket lpeco-fixture.path lpeco-fixture-inactive.service lpeco-fixture-failed.service lpeco-fixture-oneshot.service; do
-    [ "$(systemctl show --property=LoadState --value -- "$unit")" = loaded ] || { printf 'unit is not loaded: %s\n' "$unit" >&2; exit 1; }
+    load_state=$(systemctl show --property=LoadState --value -- "$unit")
+    if [ "$load_state" != loaded ]; then
+      printf 'unit is not loaded: %s (LoadState=%s)\n' "$unit" "$load_state" >&2
+      systemctl show --property=LoadState,UnitFileState,FragmentPath -- "$unit" >&2 || true
+      systemctl status --no-pager -- "$unit" >&2 || true
+      find /etc/systemd/system -maxdepth 2 -name 'lpeco-fixture*' -printf 'fixture-file=%p owner=%u:%g mode=%m\n' >&2 || true
+      tail -n 120 /var/log/cloud-init-output.log >&2 || true
+      tail -n 120 /var/log/cloud-init.log >&2 || true
+      exit 1
+    fi
   done
   [ "$(systemctl show --property=MainPID --value -- lpeco-fixture.service)" -gt 0 ]
   [ "$(systemctl show --property=ActiveState --value -- lpeco-fixture-inactive.service)" = inactive ]
   [ "$(systemctl show --property=ActiveState --value -- lpeco-fixture-failed.service)" = failed ]
   [ "$(systemctl show --property=Type --value -- lpeco-fixture-oneshot.service)" = oneshot ]
   for trigger in lpeco-fixture.timer lpeco-fixture.socket lpeco-fixture.path; do
-    [ "$(systemctl show --property=ActiveState --value -- "$trigger")" = active ] || { printf 'activation unit is not active: %s\n' "$trigger" >&2; exit 1; }
-    [ "$(systemctl show --property=Unit --value -- "$trigger")" = lpeco-fixture.service ] || { printf 'activation target mismatch: %s\n' "$trigger" >&2; exit 1; }
+    active_state=$(systemctl show --property=ActiveState --value -- "$trigger")
+    if [ "$active_state" != active ]; then
+      printf 'activation unit is not active: %s (ActiveState=%s)\n' "$trigger" "$active_state" >&2
+      systemctl show --property=LoadState,ActiveState,SubState,Result,Triggers -- "$trigger" >&2 || true
+      systemctl status --no-pager -- "$trigger" >&2 || true
+      exit 1
+    fi
+    activation_targets=$(systemctl show --property=Triggers --value -- "$trigger")
+    case " $activation_targets " in
+      *' lpeco-fixture.service '*) ;;
+      *) printf 'activation target mismatch: %s (Triggers=%s)\n' "$trigger" "$activation_targets" >&2; exit 1 ;;
+    esac
   done
 }
 

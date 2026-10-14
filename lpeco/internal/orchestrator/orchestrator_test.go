@@ -20,6 +20,7 @@ import (
 	packagecollect "github.com/normalone/lpeco/internal/collect/packageinfo"
 	pathcollect "github.com/normalone/lpeco/internal/collect/path"
 	processcollect "github.com/normalone/lpeco/internal/collect/process"
+	systemdcollect "github.com/normalone/lpeco/internal/collect/systemd"
 	graphpkg "github.com/normalone/lpeco/internal/graph"
 	"github.com/normalone/lpeco/internal/model"
 	"github.com/normalone/lpeco/internal/probe"
@@ -187,6 +188,35 @@ func TestDiscoverCarriesMountBoundariesIntoFallbackPlanning(t *testing.T) {
 	want := []collect.Mount{{ID: 7, MajorMinor: "8:2", Root: "/", MountPoint: "/srv", Bind: true}}
 	if !reflect.DeepEqual(discovery.Mounts, want) {
 		t.Fatalf("discovered mounts = %#v, want %#v", discovery.Mounts, want)
+	}
+}
+
+func TestDiscoverPreservesSystemdManagerScope(t *testing.T) {
+	facts := []model.Fact{
+		testFact("systemd_unit", "systemd", "e-system", systemdcollect.UnitFact{
+			Name: "demo.service", Manager: "system", ManagerUID: 0, UID: 0,
+			EvidenceIDs: []string{"e-system"}, Confidence: model.ConfidenceHigh,
+		}),
+		testFact("systemd_unit", "systemd", "e-user", systemdcollect.UnitFact{
+			Name: "agent.service", Manager: "user", ManagerUID: 1000, UID: 1000,
+			EvidenceIDs: []string{"e-user"}, Confidence: model.ConfidenceHigh,
+		}),
+		testFact("systemd_unit", "systemd", "e-not-found", systemdcollect.UnitFact{
+			Name: "not-installed.service", Manager: "system", ManagerUID: 0, LoadState: "not-found", RuntimeObserved: true,
+			EvidenceIDs: []string{"e-not-found"}, Confidence: model.ConfidenceHigh,
+		}),
+		testFact("systemd_activation", "systemd", "e-trigger", systemdcollect.ActivationFact{
+			TriggerUnit: "ghost.socket", TargetUnit: "ghost.service", Manager: "system", ManagerUID: 0,
+			Kind: "socket", Active: true, Automatic: true, EvidenceIDs: []string{"e-trigger"}, Confidence: model.ConfidenceHigh,
+		}),
+	}
+	discovery := discover(facts)
+	want := []collect.UnitIdentity{
+		{Name: "demo.service", Manager: "system", ManagerUID: 0},
+		{Name: "agent.service", Manager: "user", ManagerUID: 1000},
+	}
+	if !reflect.DeepEqual(discovery.Units, want) {
+		t.Fatalf("discovered scoped units = %#v, want %#v", discovery.Units, want)
 	}
 }
 
@@ -437,6 +467,31 @@ func TestCollectorRequestedPassiveFallbackExecutesAlternateVariant(t *testing.T)
 	}
 	if len(result.Issues) != 0 {
 		t.Fatalf("recovered fallback issues = %#v", result.Issues)
+	}
+}
+
+func TestUnsupportedRequiredProbeRemainsVisibleAndInterruptsScan(t *testing.T) {
+	unsupported := testDefinition("process.required-tool", "process", model.PassiveRead)
+	unsupported.Variants[0].Requirements = []probe.Requirement{probe.CommandRequirement("missing-tool")}
+	transport := newFakeAdapter(adapter.Capabilities{TransportKind: "ssh", MaxCommandBytes: 1 << 20, MaxOutputBytes: 1 << 20})
+	result, err := Run(context.Background(), transport, newTestStore(t, "unsupported-required"), Options{
+		SessionID: "unsupported-required",
+		Collectors: []collect.Collector{
+			testCollector{id: "context", plan: fixedPlan(testDefinition("context.current", "context", model.PassiveRead)), parse: contextFacts},
+			testCollector{id: "process", plan: fixedPlan(unsupported)},
+		},
+		PrimaryRules: []rules.Rule{}, Rules: []rules.Rule{},
+	})
+	if err == nil || len(result.Issues) == 0 {
+		t.Fatalf("unsupported required probe = issues %#v, err %v; want a resumable issue", result.Issues, err)
+	}
+	for _, issue := range result.Issues {
+		if issue.ProbeID != unsupported.ID || !errors.Is(issue.Err, adapter.ErrUnsupported) {
+			t.Fatalf("unsupported required probe issue = %#v", issue)
+		}
+	}
+	if transport.callCount(unsupported.ID) != 0 {
+		t.Fatalf("unsupported required probe executed %d time(s)", transport.callCount(unsupported.ID))
 	}
 }
 

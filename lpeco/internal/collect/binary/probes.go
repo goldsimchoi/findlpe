@@ -309,9 +309,12 @@ type Collector struct {
 
 func (Collector) ID() string { return "binary" }
 
-func (collector Collector) Plan(_ model.HostProfile, discovery collect.Discovery) []probe.Definition {
-	definitions := []probe.Definition{SudoersDefinition(), SudoListDefinition()}
-	if len(discovery.Mounts) > 0 {
+func (collector Collector) Plan(profile model.HostProfile, discovery collect.Discovery) []probe.Definition {
+	definitions := []probe.Definition{SudoersDefinition()}
+	if supportsAnyCommand(profile, "sudo") {
+		definitions = append(definitions, SudoListDefinition())
+	}
+	if supportsAnyCommand(profile, "find") && len(discovery.Mounts) > 0 {
 		mounts := make([]pathcollect.MountObservation, 0, len(discovery.Mounts))
 		for _, mount := range discovery.Mounts {
 			mounts = append(mounts, pathcollect.MountObservation{
@@ -322,7 +325,7 @@ func (collector Collector) Plan(_ model.HostProfile, discovery collect.Discovery
 		for _, target := range PlanWalk(mounts, collector.WalkOptions) {
 			definitions = append(definitions, PrivilegedDefinitionWithExcludes(target.Root, collector.WalkOptions.Excludes, target.Limit))
 		}
-	} else {
+	} else if supportsAnyCommand(profile, "find") {
 		roots := unique(collector.WalkOptions.Roots)
 		if len(roots) == 0 {
 			roots = []string{"/"}
@@ -332,13 +335,27 @@ func (collector Collector) Plan(_ model.HostProfile, discovery collect.Discovery
 			definitions = append(definitions, PrivilegedDefinitionWithExcludes(root, collector.WalkOptions.Excludes, collector.WalkOptions.Limit))
 		}
 	}
-	paths := append([]string(nil), discovery.ReferencedPaths...)
-	sort.Strings(paths)
-	paths = unique(paths)
-	for _, path := range paths {
-		definitions = append(definitions, ELFDefinition(path))
+	if supportsAnyCommand(profile, "readelf", "objdump") {
+		paths := append([]string(nil), discovery.ReferencedPaths...)
+		sort.Strings(paths)
+		paths = unique(paths)
+		for _, path := range paths {
+			definitions = append(definitions, ELFDefinition(path))
+		}
 	}
 	return definitions
+}
+
+func supportsAnyCommand(profile model.HostProfile, names ...string) bool {
+	if profile.AvailableCommands == nil {
+		return true
+	}
+	for _, name := range names {
+		if profile.AvailableCommands[name] {
+			return true
+		}
+	}
+	return false
 }
 
 func (Collector) Parse(definition probe.Definition, result adapter.ExecResult, evidenceID string) ([]model.Fact, error) {

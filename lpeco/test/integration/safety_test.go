@@ -42,6 +42,303 @@ func TestContainerFixtureRequiresDisposableGuard(t *testing.T) {
 	}
 }
 
+func TestVMPrepareRequiresDisposableGuard(t *testing.T) {
+	script := filepath.Join("vm", "prepare.sh")
+	command := exec.Command(script)
+	command.Env = append(os.Environ(), "LPECO_VM_DISPOSABLE=")
+	output, err := command.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 64 {
+		t.Fatalf("unguarded VM preparation = (%v, %q), want exit 64", err, output)
+	}
+	if !strings.Contains(string(output), "refusing VM preparation") {
+		t.Fatalf("unguarded VM preparation output = %q", output)
+	}
+}
+
+func TestVMPrepareRejectsBaseImageDigestMismatchWithoutArtifacts(t *testing.T) {
+	root := t.TempDir()
+	baseImage := filepath.Join(root, "base.img")
+	if err := os.WriteFile(baseImage, []byte("not-a-cloud-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputImage := filepath.Join(root, "prepared.qcow2")
+	sshKey := filepath.Join(root, "id_ed25519")
+	script := filepath.Join("vm", "prepare.sh")
+	command := exec.Command(script)
+	command.Env = append(os.Environ(),
+		"LPECO_VM_DISPOSABLE=YES",
+		"LPECO_VM_BASE_IMAGE="+baseImage,
+		"LPECO_VM_BASE_SHA256="+strings.Repeat("0", 64),
+		"LPECO_VM_IMAGE="+outputImage,
+		"LPECO_VM_SSH_KEY="+sshKey,
+		"LPECO_VM_SSH_USER=lpeco",
+		"LPECO_VM_SSH_PORT=22222",
+	)
+	output, err := command.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 65 {
+		t.Fatalf("mismatched VM base digest = (%v, %q), want exit 65", err, output)
+	}
+	if !strings.Contains(string(output), "base image checksum mismatch") {
+		t.Fatalf("mismatched VM base digest output = %q", output)
+	}
+	for _, path := range []string{outputImage, sshKey, sshKey + ".pub"} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("failed preparation left artifact %s: %v", path, statErr)
+		}
+	}
+}
+
+func TestVMFixtureDocumentsVerifiedPreparation(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("vm", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"make prepare-vm",
+		"LPECO_VM_BASE_IMAGE",
+		"LPECO_VM_BASE_SHA256",
+		"release-20260926",
+	} {
+		if !strings.Contains(string(readme), required) {
+			t.Errorf("VM preparation documentation is missing %q", required)
+		}
+	}
+	makefile, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(makefile), "prepare-vm:") {
+		t.Error("Makefile is missing prepare-vm target")
+	}
+}
+
+func TestVMPreparationDefersUserOwnedUnitSource(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("vm", "prepare.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(content)
+	start := strings.Index(script, "path: /etc/systemd/system/lpeco-fixture.service.d/20-local.conf")
+	if start < 0 {
+		t.Fatal("VM preparation is missing the user-controlled unit drop-in")
+	}
+	entry := script[start:]
+	if next := strings.Index(entry, "\n  - path:"); next >= 0 {
+		entry = entry[:next]
+	}
+	if !strings.Contains(entry, "owner: ${LPECO_VM_SSH_USER}:${LPECO_VM_SSH_USER}") {
+		t.Fatal("fixture unit drop-in is not owned by the scanning user")
+	}
+	if !strings.Contains(entry, "defer: true") {
+		t.Fatal("new-user-owned write_files entry must be deferred until cloud-init final stage")
+	}
+}
+
+func TestVMPreparationUsesNativeSocketActivationSemantics(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("vm", "prepare.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(content)
+	start := strings.Index(script, "path: /etc/systemd/system/lpeco-fixture.socket")
+	if start < 0 {
+		t.Fatal("VM preparation is missing the socket activation unit")
+	}
+	entry := script[start:]
+	if next := strings.Index(entry, "\n  - path:"); next >= 0 {
+		entry = entry[:next]
+	}
+	if !strings.Contains(entry, "Service=lpeco-fixture.service") {
+		t.Fatal("socket fixture must use systemd's Service= activation directive")
+	}
+	if strings.Contains(entry, "Unit=lpeco-fixture.service") {
+		t.Fatal("socket fixture must not use the timer/path-only Unit= directive")
+	}
+	assertion, err := os.ReadFile(filepath.Join("vm", "assert.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(assertion), "--property=Triggers") {
+		t.Fatal("VM assertion must verify the generic runtime activation relationship")
+	}
+}
+
+func TestVMPreparationStartsActivationUnitsBeforeTheirService(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("vm", "prepare.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(content)
+	start := strings.Index(script, "- [systemctl, start,")
+	if start < 0 {
+		t.Fatal("VM preparation is missing the activation start command")
+	}
+	line := script[start:]
+	if end := strings.IndexByte(line, '\n'); end >= 0 {
+		line = line[:end]
+	}
+	serviceOffset := strings.Index(line, "lpeco-fixture.service")
+	if serviceOffset < 0 {
+		t.Fatal("VM preparation does not start the target service")
+	}
+	for _, trigger := range []string{"lpeco-fixture.timer", "lpeco-fixture.socket", "lpeco-fixture.path"} {
+		triggerOffset := strings.Index(line, trigger)
+		if triggerOffset < 0 {
+			t.Errorf("VM preparation does not start %s", trigger)
+		} else if triggerOffset > serviceOffset {
+			t.Errorf("VM preparation starts %s after its target service", trigger)
+		}
+	}
+}
+
+func TestVMFixtureGetfaclReportsBaseModeEntries(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "mode-fixture")
+	if err := os.WriteFile(target, []byte("fixture\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(filepath.Join("vm", "fixture-getfacl"), "-cpn", "--", target)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fixture getfacl failed: %v: %s", err, output)
+	}
+	want := "user::rw-\ngroup::r--\nother::---\n"
+	if string(output) != want {
+		t.Fatalf("fixture getfacl output = %q, want %q", output, want)
+	}
+}
+
+func TestVMPreparationInstallsAndChecksFixtureGetfacl(t *testing.T) {
+	preparation, err := os.ReadFile(filepath.Join("vm", "prepare.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"fixture-getfacl", "path: /usr/local/bin/getfacl"} {
+		if !strings.Contains(string(preparation), required) {
+			t.Errorf("VM preparation does not install %q", required)
+		}
+	}
+	assertion, err := os.ReadFile(filepath.Join("vm", "assert.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(assertion), "command -v getfacl") {
+		t.Fatal("VM assertion does not verify the fixture ACL observer")
+	}
+}
+
+func TestVMRunnerPinsAllAdvertisedHostKeysBeforeScanning(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("vm", "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(content)
+	keyscanOffset := strings.Index(script, "ssh-keyscan")
+	scanOffset := strings.Index(script, `"$LPECO_BINARY" scan ssh`)
+	if keyscanOffset < 0 {
+		t.Fatal("VM runner must collect every advertised SSH host key")
+	}
+	if scanOffset < 0 || keyscanOffset > scanOffset {
+		t.Fatal("VM runner must pin host keys before launching LPECO")
+	}
+	strictOffset := strings.Index(script[keyscanOffset:scanOffset], "StrictHostKeyChecking=yes")
+	if strictOffset < 0 {
+		t.Fatal("VM runner must use strict host-key checking after key discovery")
+	}
+	if strings.Contains(script[keyscanOffset:scanOffset], "ssh_options+=( -o StrictHostKeyChecking=yes )") {
+		t.Fatal("VM runner must replace accept-new options because OpenSSH keeps the first duplicate option value")
+	}
+	if !strings.Contains(script[keyscanOffset:scanOffset], "strict_ssh_options=(") {
+		t.Fatal("VM runner must build a strict-only SSH option set after host-key discovery")
+	}
+}
+
+func TestVMRunnerRejectsNonNumericSizingBeforeQEMU(t *testing.T) {
+	for _, variable := range []string{"LPECO_VM_MEMORY_MB", "LPECO_VM_CPUS", "LPECO_VM_BOOT_TIMEOUT"} {
+		t.Run(variable, func(t *testing.T) {
+			root := t.TempDir()
+			image := filepath.Join(root, "fixture.qcow2")
+			key := filepath.Join(root, "id_ed25519")
+			for _, path := range []string{image, key} {
+				if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stubDirectory := filepath.Join(root, "bin")
+			if err := os.Mkdir(stubDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(root, "qemu-img-invoked")
+			qemuImageStub := filepath.Join(stubDirectory, "qemu-img")
+			if err := os.WriteFile(qemuImageStub, []byte("#!/bin/sh\n: > \"$LPECO_TEST_QEMU_MARKER\"\nexit 99\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			command := exec.Command(filepath.Join("vm", "run.sh"))
+			command.Env = []string{
+				"PATH=" + stubDirectory + ":" + os.Getenv("PATH"),
+				"LPECO_TEST_QEMU_MARKER=" + marker,
+				"LPECO_VM_DISPOSABLE=YES",
+				"LPECO_VM_IMAGE=" + image,
+				"LPECO_VM_SSH_USER=lpeco",
+				"LPECO_VM_SSH_KEY=" + key,
+				"LPECO_VM_SSH_PORT=22222",
+				"LPECO_BINARY=/bin/true",
+				variable + "=1+1",
+			}
+			output, err := command.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 64 {
+				t.Fatalf("invalid %s = (%v, %q), want exit 64", variable, err, output)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("invalid %s reached qemu-img: %v", variable, statErr)
+			}
+		})
+	}
+}
+
+func TestVMCheckpointResolutionUsesLatestSuccessfulProbeState(t *testing.T) {
+	checkpoint := `{
+  "checkpoint": {
+    "completed": {
+      "recovered|attempt-0": {
+        "probe_id": "systemd.cat.system.recovered.service",
+        "status": "partial"
+      },
+      "recovered|attempt-1": {
+        "probe_id": "systemd.cat.system.recovered.service",
+        "status": "complete"
+      },
+      "unresolved|attempt-0": {
+        "probe_id": "process.environment.1",
+        "status": "unavailable"
+      },
+      "complete|attempt-0": {
+        "probe_id": "context.current",
+        "status": "complete"
+      }
+    }
+  }
+}`
+	command := exec.Command("awk", "-f", filepath.Join("vm", "checkpoint-resolution.awk"))
+	command.Stdin = strings.NewReader(checkpoint)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("checkpoint resolution failed: %v: %s", err, output)
+	}
+	lines := strings.FieldsFunc(strings.TrimSpace(string(output)), func(r rune) bool { return r == '\n' })
+	sort.Strings(lines)
+	want := []string{
+		"recovered\tsystemd.cat.system.recovered.service",
+		"unresolved\tprocess.environment.1",
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("checkpoint resolution = %#v, want %#v", lines, want)
+	}
+}
+
 func TestContainerDockerfilesDeclareDisposableBuildMarker(t *testing.T) {
 	for _, fixture := range []string{"debian", "alpine"} {
 		t.Run(fixture, func(t *testing.T) {

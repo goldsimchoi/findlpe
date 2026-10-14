@@ -11,7 +11,14 @@ type Discovery struct {
 	HighValueProcesses []ProcessIdentity
 	ReferencedPaths    []string
 	UnitNames          []string
+	Units              []UnitIdentity
 	Mounts             []Mount
+}
+
+type UnitIdentity struct {
+	Name       string `json:"name"`
+	Manager    string `json:"manager"`
+	ManagerUID int    `json:"manager_uid"`
 }
 
 type ProcessIdentity struct {
